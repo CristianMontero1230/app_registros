@@ -1,1283 +1,1305 @@
-import os
-import csv
-import json
-from datetime import datetime
-from io import BytesIO
-from flask import Flask, request, redirect, url_for, session, send_file, render_template_string
+import streamlit as st
 import pandas as pd
-from openpyxl.styles import Font, PatternFill
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit.components.v1 as components
+import os
+import json
+import re
+from datetime import datetime
+import glob
+import time
+import io
+import gc
 
-app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'change-me-dev')
+# ===================== CONFIGURACIÓN DE PÁGINA =====================
+st.set_page_config(
+    page_title="IPS GOLEMAN APP",
+    page_icon="🏥",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-ADMIN_USER = os.environ.get('ADMIN_USER')
-ADMIN_PASS = os.environ.get('ADMIN_PASS')
-
-DATA_HEADERS = [
-    'ID',
-    'Nombre profesional',
-    'Documento profesional',
-    'Nombre paciente',
-    'Documento paciente',
-    'Fecha inicio',
-    'Municipio',
-    'Procedimiento',
-    'Subido a Panacea',
-    'Novedad',
-    'Creado',
-    'Modificado'
-]
-
-DATA_ACTIVITIES_HEADERS = [
-    'ID',
-    'Fecha',
-    'Nombre profesional',
-    'Actividad',
-    'Creado',
-    'Modificado'
-]
-
-DATA_PATH = os.path.join(os.path.dirname(__file__), 'registros_procedimientos.csv')
-DATA_ACTIVITIES_PATH = os.path.join(os.path.dirname(__file__), 'registros_actividades.csv')
-EXCEL_PATH = os.path.join(os.path.dirname(__file__), 'registros_procedimientos.xlsx')
-EXCEL_ACTIVITIES_PATH = os.path.join(os.path.dirname(__file__), 'registros_actividades.xlsx')
-CATALOG_PATH = os.path.join(os.path.dirname(__file__), 'catalogo_formulario.json')
-UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
-CATALOG_FILE_PATH = None
-CATALOG = {}
-
-def ensure_data_file():
-    if not os.path.exists(DATA_PATH):
-        # Try to restore from Excel if exists
-        restored = False
-        if os.path.exists(EXCEL_PATH):
-            try:
-                df = pd.read_excel(EXCEL_PATH)
-                # Ensure headers match
-                df = df.reindex(columns=DATA_HEADERS)
-                df.to_csv(DATA_PATH, index=False)
-                restored = True
-            except Exception as e:
-                print(f"Error restoring CSV from Excel: {e}")
-        
-        if not restored:
-            with open(DATA_PATH, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(DATA_HEADERS)
+# ===================== ESTILOS CSS =====================
+def load_css():
+    st.markdown("""
+    <style>
+    /* Estilo General de Botones */
+    div.stButton > button {
+        background-color: #005f73;
+        color: white;
+        border-radius: 8px;
+        border: none;
+        font-weight: bold;
+    }
+    div.stButton > button:hover {
+        background-color: #0a9396;
+        color: white;
+        border-color: #0a9396;
+    }
+    div.stButton > button:active {
+        background-color: #94d2bd;
+        color: #005f73;
+    }
     
-    # Also ensure Excel exists if missing
-    if not os.path.exists(EXCEL_PATH):
-        update_excel_file()
+    /* Inputs */
+    .stTextInput > div > div > input {
+        border-radius: 8px;
+        border: 1px solid #94d2bd;
+    }
+    
+    /* Login Box */
+    .login-box {
+        background-color: #e0fbfc;
+        padding: 40px;
+        border-radius: 20px;
+        box-shadow: 0px 4px 15px rgba(0,0,0,0.1);
+        text-align: center;
+        margin-bottom: 20px;
+        border: 2px solid #94d2bd;
+    }
+    
+    /* Header User Box */
+    .user-box {
+        background-color: #e0fbfc;
+        padding: 10px 20px;
+        border-radius: 12px;
+        text-align: center;
+        border: 1px solid #94d2bd;
+        color: #005f73;
+        font-weight: bold;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+    }
+    
+    /* Hover Row Effect (Solo afecta tablas HTML standard, no st.dataframe canvas) */
+    tr:hover {
+        background-color: #d0f0c0 !important;
+        cursor: pointer;
+    }
+    
+    /* Background Color Main App */
+    .stApp {
+        background-color: #f0f8ff; /* Azul claro muy suave */
+    }
+    
+    /* Sidebar Background */
+    section[data-testid="stSidebar"] {
+        background-color: #e0fbfc; /* Color suave para el sidebar */
+        border-right: 2px solid #94d2bd;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-def ensure_activities_file():
-    if not os.path.exists(DATA_ACTIVITIES_PATH):
-        # Try to restore from Excel if exists
-        restored = False
-        if os.path.exists(EXCEL_ACTIVITIES_PATH):
+def load_login_css():
+    st.markdown("""
+    <style>
+    div.stButton > button {
+        width: 100%;
+        padding: 10px;
+        font-size: 16px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# ===================== FORMATOS =====================
+def formato_pesos(x):
+    try:
+        return "$ {:,.0f}".format(x).replace(",", ".")
+    except:
+        return x
+
+def formato_cedula(x):
+    try:
+        return "Cédula: {:,.0f}".format(x).replace(",", ".")
+    except:
+        return x
+
+def formato_edad(x):
+    try:
+        return f"{int(x)} años"
+    except:
+        return x
+
+# ===================== PERSISTENCIA =====================
+STATE_FILE = "user_state.json"
+ARCHIVO_FECHA = "fecha_update.txt"
+
+def guardar_meta(nombre_archivo, valor):
+    with open(nombre_archivo, "w") as f:
+        f.write(str(valor))
+
+def cargar_meta(nombre_archivo):
+    if os.path.exists(nombre_archivo):
+        with open(nombre_archivo, "r") as f:
             try:
-                df = pd.read_excel(EXCEL_ACTIVITIES_PATH)
-                # Ensure headers match
-                df = df.reindex(columns=DATA_ACTIVITIES_HEADERS)
-                df.to_csv(DATA_ACTIVITIES_PATH, index=False)
-                restored = True
-            except Exception as e:
-                print(f"Error restoring Activities CSV from Excel: {e}")
+                return float(f.read().strip())
+            except:
+                return 0
+    return 0
+
+def guardar_fecha_actualizacion():
+    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    with open(ARCHIVO_FECHA, "w") as f:
+        f.write(now)
+    return now
+
+def cargar_fecha_actualizacion():
+    # Buscar el archivo consolidado más reciente
+    archivos = glob.glob("archivo_consolidado*.xlsx")
+    if archivos:
+        # Ordenar por fecha de modificación (el más reciente al final)
+        archivo_reciente = max(archivos, key=os.path.getmtime)
+        timestamp = os.path.getmtime(archivo_reciente)
+        return datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y %I:%M:%S %p")
         
-        if not restored:
-            with open(DATA_ACTIVITIES_PATH, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(DATA_ACTIVITIES_HEADERS)
+    elif os.path.exists(ARCHIVO_FECHA):
+        with open(ARCHIVO_FECHA, "r") as f:
+            return f.read().strip()
+    return "Sin actualizaciones"
+
+def generar_excel_filtros(df, nombre_prof, fecha_inicio, fecha_fin, procedimiento, ciudad):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # HOJA 1: DATOS FILTRADOS (RAW)
+        df.to_excel(writer, sheet_name='Datos Filtrados', index=False)
+        
+        # HOJA 2: RESUMEN PROFESIONAL
+        if not df.empty:
+            col_profesional = next((c for c in df.columns if "profesional" in str(c).lower()), None)
+            col_procedimiento = next((c for c in df.columns if "nombre procedimiento" in str(c).lower()), None)
+            col_valor = next((c for c in df.columns if "valor" in str(c).lower()), None)
+            
+            if col_profesional and col_procedimiento and col_valor:
+                try:
+                    temp = df.copy()
+                    temp["_valor"] = pd.to_numeric(temp[col_valor], errors='coerce').fillna(0)
+                    agrupado = temp.groupby([col_profesional, col_procedimiento]).agg(
+                        Total_Servicios=(col_procedimiento, 'count'),
+                        Valor_Total=('_valor', 'sum')
+                    ).reset_index()
+                    agrupado.to_excel(writer, sheet_name='Resumen Profesional', index=False)
+                except:
+                    pass
+
+        # HOJA 3: RESUMEN PACIENTE
+        if not df.empty:
+            col_paciente = next((c for c in df.columns if "paciente" in str(c).lower()), None)
+            # Reutilizar columnas detectadas o buscar de nuevo si es necesario
+            if 'col_procedimiento' not in locals() or not col_procedimiento:
+                col_procedimiento = next((c for c in df.columns if "nombre procedimiento" in str(c).lower()), None)
+            if 'col_valor' not in locals() or not col_valor:
+                col_valor = next((c for c in df.columns if "valor" in str(c).lower()), None)
+
+            if col_paciente and col_procedimiento and col_valor:
+                try:
+                    temp = df.copy()
+                    temp["_valor"] = pd.to_numeric(temp[col_valor], errors='coerce').fillna(0)
+                    
+                    # Agrupar por Paciente y Procedimiento
+                    agrupado_paciente = temp.groupby([col_paciente, col_procedimiento]).agg(
+                        Cantidad=(col_procedimiento, 'count'),
+                        Valor_Total=('_valor', 'sum')
+                    ).reset_index()
+                    
+                    agrupado_paciente.to_excel(writer, sheet_name='Resumen Paciente', index=False)
+                except:
+                    pass
+        
+        # HOJA 4: TOTALES
+        if not df.empty and col_procedimiento and col_valor:
+             try:
+                temp = df.copy()
+                temp["_val"] = pd.to_numeric(temp[col_valor], errors='coerce').fillna(0)
+                agrupado_total = temp.groupby(col_procedimiento)["_val"].sum().reset_index()
+                agrupado_total.to_excel(writer, sheet_name='Totales', index=False)
+             except:
+                pass
+
+        # HOJA 5: DASHBOARD
+        if not df.empty and col_profesional:
+             try:
+                counts = df[col_profesional].value_counts().reset_index()
+                counts.columns = ["Profesional", "Servicios"]
+                counts.to_excel(writer, sheet_name='Dashboard', index=False)
+             except:
+                pass
                 
-    # Also ensure Excel exists if missing
-    if not os.path.exists(EXCEL_ACTIVITIES_PATH):
-        update_activities_excel_file()
-
-def sync_activities_db():
-    """
-    Synchronizes the internal CSV database with the Excel file.
-    The Excel file is treated as the Source of Truth.
-    If Excel exists, we update the CSV to match it.
-    """
-    if os.path.exists(EXCEL_ACTIVITIES_PATH):
-        try:
-            # Read Excel file
-            df_excel = pd.read_excel(EXCEL_ACTIVITIES_PATH)
-            
-            # Ensure it has the correct headers (enforce schema)
-            # This handles case where user might have deleted columns or reordered them
-            for col in DATA_ACTIVITIES_HEADERS:
-                if col not in df_excel.columns:
-                    df_excel[col] = '' # Add missing columns
-            
-            df_excel = df_excel.reindex(columns=DATA_ACTIVITIES_HEADERS)
-            
-            # Write to CSV (Mirroring Excel to App Storage)
-            df_excel.to_csv(DATA_ACTIVITIES_PATH, index=False)
-        except Exception as e:
-            print(f"Error syncing from Excel to CSV: {e}")
-            # If sync fails (e.g. Excel open by user and locked), we fallback to existing CSV
-            pass
-
-def generate_excel_bytes():
-    """Generates the Excel file in memory and returns a BytesIO object."""
-    ensure_data_file()
-    try:
-        df = pd.read_csv(DATA_PATH)
-    except Exception:
-        df = pd.DataFrame(columns=DATA_HEADERS)
-        
-    if 'Fecha inicio' in df.columns:
-        df['Fecha inicio'] = pd.to_datetime(df['Fecha inicio'], errors='coerce')
-    
-    # Ensure columns are in the correct order
-    df = df.reindex(columns=DATA_HEADERS)
-    
-    sort_cols = [c for c in ['Fecha inicio','Municipio','Nombre paciente'] if c in df.columns]
-    if sort_cols:
-        df = df.sort_values(by=sort_cols, ascending=[True, True, True], na_position='last')
-        
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Registros')
-        ws = writer.book['Registros']
-        ws.freeze_panes = 'A2'
-        header_fill = PatternFill(fill_type='solid', start_color='EEF3FF', end_color='EEF3FF')
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-            cell.fill = header_fill
-        for col in ws.columns:
-            max_len = 0
-            col_letter = col[0].column_letter
-            for cell in col:
-                val = '' if cell.value is None else str(cell.value)
-                if len(val) > max_len:
-                    max_len = len(val)
-            ws.column_dimensions[col_letter].width = min(48, max(12, max_len + 2))
     output.seek(0)
     return output
 
-def update_excel_file():
-    """Reads the current CSV and saves it as a formatted Excel file."""
-    try:
-        excel_bytes = generate_excel_bytes()
-        with open(EXCEL_PATH, 'wb') as f:
-            f.write(excel_bytes.getvalue())
-    except Exception as e:
-        print(f"Error updating Excel file (file might be open): {e}")
+def guardar_excel(df, nombre_archivo="base_guardada.xlsx"):
+    df.to_excel(nombre_archivo, index=False)
 
-def generate_activities_excel_bytes():
-    """Generates the Activities Excel file in memory."""
-    ensure_activities_file()
-    try:
-        df = pd.read_csv(DATA_ACTIVITIES_PATH)
-    except Exception as e:
-        # Only ignore error if file is missing (should have been created by ensure) or empty
-        # If file exists but is locked/unreadable, we should log it
-        if os.path.exists(DATA_ACTIVITIES_PATH) and os.path.getsize(DATA_ACTIVITIES_PATH) > 0:
-            print(f"Error reading activities CSV for Excel generation: {e}")
-        df = pd.DataFrame(columns=DATA_ACTIVITIES_HEADERS)
-        
-    if 'Fecha' in df.columns:
-        df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
-        df = df.sort_values(by='Fecha', ascending=True)
-    
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Actividades')
-        ws = writer.book['Actividades']
-        ws.freeze_panes = 'A2'
-        header_fill = PatternFill(fill_type='solid', start_color='EEF3FF', end_color='EEF3FF')
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-            cell.fill = header_fill
-        for col in ws.columns:
-            max_len = 0
-            col_letter = col[0].column_letter
-            for cell in col:
-                val = '' if cell.value is None else str(cell.value)
-                if len(val) > max_len:
-                    max_len = len(val)
-            ws.column_dimensions[col_letter].width = min(60, max(12, max_len + 2))
-    output.seek(0)
-    return output
-
-def update_activities_excel_file():
-    try:
-        excel_bytes = generate_activities_excel_bytes()
-        with open(EXCEL_ACTIVITIES_PATH, 'wb') as f:
-            f.write(excel_bytes.getvalue())
-    except Exception as e:
-        print(f"Error updating Activities Excel file: {e}")
-
-def load_catalog():
-    global CATALOG
-    os.makedirs(UPLOADS_DIR, exist_ok=True)
-    if os.path.exists(CATALOG_PATH):
+def cargar_excel(nombre_archivo="base_guardada.xlsx"):
+    if os.path.exists(nombre_archivo):
         try:
-            with open(CATALOG_PATH, 'r', encoding='utf-8') as f:
-                CATALOG = json.load(f)
-        except Exception:
-            CATALOG = {}
-    else:
-        CATALOG = {}
-    cfg = CATALOG if isinstance(CATALOG, dict) else {}
-    fp = cfg.get('catalog_file_path')
-    if fp and os.path.exists(fp):
-        global CATALOG_FILE_PATH
-        CATALOG_FILE_PATH = fp
-
-def save_catalog(cat):
-    with open(CATALOG_PATH, 'w', encoding='utf-8') as f:
-        json.dump(cat, f, ensure_ascii=False)
-
-def validate_payload(p):
-    req = ['fecha_inicio', 'municipio', 'nombre_prof', 'doc_prof', 'nombre_pac', 'doc_pac', 'procedimiento', 'panacea', 'novedad']
-    if not all(p.get(k, '').strip() for k in req):
-        return 'Complete todos los campos'
-    try:
-        datetime.strptime(p['fecha_inicio'], '%Y-%m-%d')
-    except Exception:
-        return 'Fecha en formato YYYY-MM-DD'
-    pv = p.get('panacea', '').strip()
-    if pv not in ('Sí', 'Si', 'No'):
-        return 'Seleccione si se subió a Panacea'
+            df = pd.read_excel(nombre_archivo)
+            return clean_df_for_st(df)
+        except:
+            return None
     return None
 
-PAGE_FORM = """
-<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Registro de Procedimientos</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #eaf2ff; color: #111; }
-    .container { max-width: 95%; margin: 32px auto; padding: 0 16px; }
-    .brand { text-align:center; margin-bottom: 18px; }
-    .brand .box { display:inline-block; padding: 15px 30px; border-radius: 12px; background: linear-gradient(135deg, #1f3b8f, #2e5cff); color:#fff; font-weight: 600; letter-spacing: .5px; font-size: 24px; box-shadow: 0 4px 15px rgba(46, 92, 255, 0.3); }
-    .card { background: #fff; border-radius: 12px; box-shadow: 0 8px 24px rgba(39,79,145,.08); padding: 20px; }
-    .row { display: grid; grid-template-columns: 240px 1fr; gap: 10px; margin-bottom: 12px; align-items: center; }
-    input, textarea, button, select { padding: 10px 12px; font-size: 14px; width: 100%; box-sizing: border-box; border: 1px solid #d5d9e2; border-radius: 8px; }
-    input:focus, textarea:focus, select:focus { outline: 2px solid #2e5cff22; border-color: #2e5cff; }
-    textarea { height: 110px; }
-    .actions { margin-top: 16px; display: flex; gap: 12px; }
-    .status { margin-top: 12px; }
-    .notice { padding: 10px 12px; border-radius: 8px; background: {% if ok %}#E8F6EE{% else %}#FCE4E4{% endif %}; color: {% if ok %}#0B7A33{% else %}#8B0000{% endif %}; border: 1px solid {% if ok %}#A6E6BE{% else %}#F5B7B7{% endif %}; }
-    .topbar { display:flex; justify-content: space-between; align-items:center; margin-bottom:16px; }
-    .title { color: #1f3b8f; margin: 0; }
-    .admin { text-decoration:none; background:#1f3b8f; color:#fff; padding:10px 14px; border-radius:8px; }
-    .btn-primary { background:#2e5cff; color:#fff; border: none; }
-    .btn-secondary { background:#e9eef9; color:#1f3b8f; border: none; }
-    @media (max-width: 600px) {
-      .row { grid-template-columns: 1fr; }
-    }
-    .tabs { display:flex; gap:10px; margin-bottom:20px; }
-    .nav-btn { text-decoration:none; background:#e9eef9; color:#1f3b8f; padding:10px 14px; border-radius:8px; font-weight:600; }
-    .nav-btn.active { background:#009688; color:#fff; }
-    .btn-search { background:#ff9800; color:#fff; border:none; font-weight:600; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="brand"><div class="box">IPS GOLEMAN</div></div>
-
-    <div class="tabs">
-        <a class="nav-btn active" href="{{ url_for('index') }}" style="background-color: #009688;">Procedimientos</a>
-        <a class="nav-btn" href="{{ url_for('activities') }}">Actividades</a>
-    </div>
-
-    <div class="card">
-      <div class="topbar">
-        <h2 class="title">Registro de Procedimientos</h2>
-        <a class="admin" href="{{ url_for('admin') }}">Administrador</a>
-      </div>
-      
-      <div style="margin-bottom: 20px; padding: 15px; background: #eef3ff; border-radius: 8px; border: 1px solid #d5d9e2;">
-        <label style="font-weight:bold; display:block; margin-bottom:5px;">Buscar Registro por ID (Solo editar Novedad/Panacea)</label>
-        <form method="post" action="{{ url_for('search_public') }}" style="display:flex; gap:10px; margin:0;">
-            <input type="number" name="search_id" placeholder="Ingrese ID..." style="flex:1;" required>
-            <button type="submit" class="btn-secondary" style="width:auto;">Buscar</button>
-        </form>
-      </div>
-
-      <form method="post" action="{{ url_for('save') }}">
-      <input type="hidden" name="id" value="{{ vals.get('id','') }}">
-      <div class="row"><label>Nombre profesional</label>
-        {% if edit_mode %}
-          <input name="nombre_prof" value="{{ vals.get('nombre_prof','') }}" readonly style="background-color: #f9f9f9; color: #555;">
-        {% else %}
-            {% if catalog.get('nombre_prof') %}
-              <select name="nombre_prof" id="nombre_prof" required>
-                <option value="">Selecciona...</option>
-                {% for v in catalog.get('nombre_prof') %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-              </select>
-            {% else %}
-              <input name="nombre_prof" id="nombre_prof" value="{{ vals.get('nombre_prof','') }}" required>
-            {% endif %}
-        {% endif %}
-      </div>
-      <div class="row"><label>Documento profesional</label>
-        {% if edit_mode %}
-          <input name="doc_prof" value="{{ vals.get('doc_prof','') }}" readonly style="background-color: #f9f9f9; color: #555;">
-        {% else %}
-            {% if catalog.get('prof_map') %}
-              <input name="doc_prof" id="doc_prof" value="{{ vals.get('doc_prof','') }}" required readonly>
-            {% elif catalog.get('doc_prof') %}
-              <select name="doc_prof" required>
-                <option value="">Selecciona...</option>
-                {% for v in catalog.get('doc_prof') %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-              </select>
-            {% else %}
-              <input name="doc_prof" value="{{ vals.get('doc_prof','') }}" required>
-            {% endif %}
-        {% endif %}
-      </div>
-      <div class="row"><label>Nombre paciente</label>
-        {% if edit_mode %}
-          <input name="nombre_pac" value="{{ vals.get('nombre_pac','') }}" readonly style="background-color: #f9f9f9; color: #555;">
-        {% else %}
-          <input name="nombre_pac" value="{{ vals.get('nombre_pac','') }}" required>
-        {% endif %}
-      </div>
-      <div class="row"><label>Documento paciente</label>
-        {% if edit_mode %}
-          <input name="doc_pac" value="{{ vals.get('doc_pac','') }}" readonly style="background-color: #f9f9f9; color: #555;">
-        {% else %}
-          <input name="doc_pac" value="{{ vals.get('doc_pac','') }}" required>
-        {% endif %}
-      </div>
-      <div class="row"><label>Fecha inicio</label>
-        {% if edit_mode %}
-          <input type="text" name="fecha_inicio" value="{{ vals.get('fecha_inicio','') }}" readonly style="background-color: #f9f9f9; color: #555;">
-        {% else %}
-          <input type="date" name="fecha_inicio" value="{{ vals.get('fecha_inicio','') }}" required>
-        {% endif %}
-      </div>
-      <div class="row"><label>Municipio</label>
-        {% if edit_mode %}
-          <input name="municipio" value="{{ vals.get('municipio','') }}" readonly style="background-color: #f9f9f9; color: #555;">
-        {% else %}
-            {% if catalog.get('municipio') %}
-              <select name="municipio" required>
-                <option value="">Selecciona...</option>
-                {% for v in catalog.get('municipio') %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-              </select>
-            {% else %}
-              <input name="municipio" value="{{ vals.get('municipio','') }}" required>
-            {% endif %}
-        {% endif %}
-      </div>
-      <div class="row"><label>Procedimiento</label>
-        {% if edit_mode %}
-          <input name="procedimiento" value="{{ vals.get('procedimiento','') }}" readonly style="background-color: #f9f9f9; color: #555;">
-        {% else %}
-            {% if catalog.get('procedimiento') %}
-              <select name="procedimiento" required>
-                <option value="">Selecciona...</option>
-                {% for v in catalog.get('procedimiento') %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
-              </select>
-            {% else %}
-              <input name="procedimiento" value="{{ vals.get('procedimiento','') }}" required>
-            {% endif %}
-        {% endif %}
-      </div>
-      <div class="row"><label>¿Se subió a Panacea?</label>
-        <select name="panacea" required>
-          <option value="">Selecciona...</option>
-          <option value="Sí" {% if vals.get('panacea') in ['Sí','Si'] %}selected{% endif %}>Sí</option>
-          <option value="No" {% if vals.get('panacea') == 'No' %}selected{% endif %}>No</option>
-        </select>
-      </div>
-      <div class="row"><label>Novedad</label><textarea name="novedad" required>{{ vals.get('novedad','') }}</textarea></div>
-      <div class="actions">
-        <button class="btn-primary" type="submit">Guardar</button>
-        {% if edit_mode %}
-           <a href="{{ url_for('index') }}"><button class="btn-secondary" type="button">Cancelar Edición</button></a>
-        {% else %}
-           <button class="btn-secondary" type="reset">Limpiar</button>
-        {% endif %}
-      </div>
-    </form>
-    {% if status %}
-      <div class="status"><div class="notice">{% if ok %}✔ {{ status }}{% else %}{{ status }}{% endif %}</div></div>
-    {% endif %}
-    </div>
-  </div>
-  <script>
-    var profMap = JSON.parse('{{ prof_map_json|safe }}' || '{}');
-    var nombreSel = document.getElementById('nombre_prof');
-    var docInput = document.getElementById('doc_prof');
-    function syncDoc() {
-      if (!nombreSel || !docInput || !profMap) return;
-      var n = nombreSel.value || '';
-      docInput.value = profMap[n] || '';
-    }
-    if (nombreSel && docInput) {
-      nombreSel.addEventListener('change', syncDoc);
-      syncDoc();
-    }
-  </script>
-</body>
-</html>
-"""
-
-PAGE_ACTIVITIES = """
-<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Registro de Actividades</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #eaf2ff; color: #111; }
-    .container { max-width: 95%; margin: 32px auto; padding: 0 16px; }
-    .brand { text-align:center; margin-bottom: 18px; }
-    .brand .box { display:inline-block; padding: 15px 30px; border-radius: 12px; background: linear-gradient(135deg, #1f3b8f, #2e5cff); color:#fff; font-weight: 600; letter-spacing: .5px; font-size: 24px; box-shadow: 0 4px 15px rgba(46, 92, 255, 0.3); }
-    .card { background: #fff; border-radius: 12px; box-shadow: 0 8px 24px rgba(39,79,145,.08); padding: 20px; }
-    .row { display: grid; grid-template-columns: 240px 1fr; gap: 10px; margin-bottom: 12px; align-items: center; }
-    input, textarea, button, select { padding: 10px 12px; font-size: 14px; width: 100%; box-sizing: border-box; border: 1px solid #d5d9e2; border-radius: 8px; }
-    input:focus, textarea:focus, select:focus { outline: 2px solid #2e5cff22; border-color: #2e5cff; }
-    textarea { height: 110px; }
-    .actions { margin-top: 16px; display: flex; gap: 12px; }
-    .status { margin-top: 12px; }
-    .notice { padding: 10px 12px; border-radius: 8px; background: {% if ok %}#E8F6EE{% else %}#FCE4E4{% endif %}; color: {% if ok %}#0B7A33{% else %}#8B0000{% endif %}; border: 1px solid {% if ok %}#A6E6BE{% else %}#F5B7B7{% endif %}; }
-    .topbar { display:flex; justify-content: space-between; align-items:center; margin-bottom:16px; }
-    .title { color: #1f3b8f; margin: 0; }
-    .nav-btn { text-decoration:none; background:#e9eef9; color:#1f3b8f; padding:10px 14px; border-radius:8px; font-weight:600; }
-    .nav-btn.active { background:#009688; color:#fff; }
-    .btn-search { background:#ff9800; color:#fff; border:none; font-weight:600; }
-    .admin { text-decoration:none; background:#1f3b8f; color:#fff; padding:10px 14px; border-radius:8px; }
-    .btn-primary { background:#2e5cff; color:#fff; border: none; }
-    .btn-secondary { background:#e9eef9; color:#1f3b8f; border: none; }
-    @media (max-width: 600px) {
-      .row { grid-template-columns: 1fr; }
-    }
-    .tabs { display:flex; gap:10px; margin-bottom:20px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="brand"><div class="box">IPS GOLEMAN</div></div>
+# ===================== LÓGICA DE NEGOCIO =====================
+def clean_df_for_st(df):
+    """Limpia el DataFrame para evitar errores de PyArrow en Streamlit"""
+    if df is None or df.empty:
+        return df
     
-    <div class="tabs">
-        <a class="nav-btn" href="{{ url_for('index') }}">Procedimientos</a>
-        <a class="nav-btn active" href="{{ url_for('activities') }}" style="background-color: #673ab7;">Actividades</a>
-    </div>
-
-    <div class="card">
-      <div class="topbar">
-        <h2 class="title">Registro de Actividades</h2>
-        <div style="display:flex; gap:10px;">
-            <a class="admin" href="{{ url_for('admin') }}">Administrador</a>
-            <a class="admin" href="{{ url_for('activities') }}" title="Inicio Actividades">🏠</a>
-        </div>
-      </div>
-      
-      <!-- Bloque de Búsqueda para Edición -->
-      <div style="margin-bottom: 20px; padding: 15px; background: #eef3ff; border-radius: 8px; border: 1px solid #d5d9e2;">
-        <label style="font-weight:bold; display:block; margin-bottom:5px;">Consultar y Editar mis Actividades</label>
-        <form method="get" action="{{ url_for('search_activities_public') }}" style="display:flex; gap:10px; margin:0; flex-wrap:wrap;">
-            <div style="flex:1; min-width:200px;">
-                {% if catalog.get('nombre_prof') %}
-                  <select name="search_prof" required>
-                    <option value="">Seleccione su nombre...</option>
-                    {% for v in catalog.get('nombre_prof') %}
-                        <option value="{{ v }}" {% if search_prof == v %}selected{% endif %}>{{ v }}</option>
-                    {% endfor %}
-                  </select>
-                {% else %}
-                  <input name="search_prof" placeholder="Nombre profesional..." value="{{ search_prof|default('') }}" required>
-                {% endif %}
-            </div>
-            <button type="submit" class="btn-search" style="width:auto;">Buscar Actividades</button>
-        </form>
-      </div>
-
-      {% if my_activities %}
-      <div style="margin-bottom: 20px; overflow-x:auto;">
-        <h3 style="font-size:16px; color:#1f3b8f; margin-bottom:10px;">Resultados para: {{ search_prof }}</h3>
-        <table style="width:100%; border-collapse:collapse; font-size:14px;">
-            <thead>
-                <tr style="background:#f4f8ff; color:#1f3b8f;">
-                    <th style="padding:8px; border-bottom:1px solid #eee;">Fecha</th>
-                    <th style="padding:8px; border-bottom:1px solid #eee;">Actividad</th>
-                    <th style="padding:8px; border-bottom:1px solid #eee;">Modificado</th>
-                    <th style="padding:8px; border-bottom:1px solid #eee;">Acción</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for act in my_activities %}
-                <tr>
-                    <td style="padding:8px; border-bottom:1px solid #eee;">{{ act.Fecha }}</td>
-                    <td style="padding:8px; border-bottom:1px solid #eee;">{{ act.Actividad }}</td>
-                    <td style="padding:8px; border-bottom:1px solid #eee; font-size:12px; color:#666;">{{ act.Modificado if act.Modificado else '-' }}</td>
-                    <td style="padding:8px; border-bottom:1px solid #eee; text-align:center;">
-                        <form method="post" action="{{ url_for('edit_activity_prep') }}" style="margin:0;">
-                            <input type="hidden" name="id" value="{{ act.ID }}">
-                            <button class="btn-secondary" type="submit" style="padding:4px 10px; font-size:12px;">Editar</button>
-                        </form>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-      </div>
-      {% endif %}
-      
-      {% if not search_prof or vals.get('id') %}
-      <form method="post" action="{{ url_for('save_activity') }}">
-      <input type="hidden" name="id" value="{{ vals.get('id','') }}">
-      <div class="row"><label>Fecha</label><input type="date" name="fecha" value="{{ vals.get('fecha','') }}" required></div>
-      <div class="row"><label>Nombre profesional</label>
-        {% if catalog.get('nombre_prof') %}
-          <select name="nombre_prof" required>
-            <option value="">Selecciona...</option>
-            {% for v in catalog.get('nombre_prof') %}
-                <option value="{{ v }}" {% if vals.get('nombre_prof') == v %}selected{% endif %}>{{ v }}</option>
-            {% endfor %}
-          </select>
-        {% else %}
-          <input name="nombre_prof" value="{{ vals.get('nombre_prof','') }}" required>
-        {% endif %}
-      </div>
-      <div class="row"><label>Actividad / Observación</label><textarea name="actividad" required>{{ vals.get('actividad','') }}</textarea></div>
-      <div class="actions">
-        <button class="btn-primary" type="submit">Guardar Actividad</button>
-        {% if vals.get('id') %}
-            <a href="{{ url_for('activities') }}"><button class="btn-secondary" type="button">Cancelar Edición</button></a>
-        {% else %}
-            <button class="btn-secondary" type="reset">Limpiar</button>
-        {% endif %}
-      </div>
-    </form>
-    {% endif %}
-
-    {% if status %}
-      <div class="status"><div class="notice">{% if ok %}✔ {{ status }}{% else %}{{ status }}{% endif %}</div></div>
-    {% endif %}
-    </div>
-  </div>
-</body>
-</html>
-"""
-
-PAGE_ADMIN = """
-<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Administrador</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #eaf2ff; color: #111; }
-    .container { max-width: 1100px; margin: 32px auto; padding: 0 16px; }
-    input, button, select { padding: 10px 12px; font-size: 14px; width: 100%; box-sizing: border-box; border: 1px solid #d5d9e2; border-radius: 8px; }
-    .row { display: grid; grid-template-columns: 150px 1fr; gap: 10px; margin-bottom: 12px; align-items: center; }
-    .status { margin-top: 12px; color: {{ 'green' if ok else '#b00020' }}; text-align: center; font-weight: 500; }
-    .actions { display: flex; gap: 12px; margin-top: 16px; justify-content: center; }
-    .actions button { width: auto; min-width: 120px; cursor: pointer; }
-    a { text-decoration:none; }
-    @media (max-width: 600px) {
-      .row { grid-template-columns: 1fr; }
-      .dashboard-grid { grid-template-columns: 1fr !important; }
-    }
-    .brand { text-align:center; margin-bottom: 24px; }
-    .brand .box { display:inline-block; padding: 10px 18px; border-radius: 12px; background: #1f3b8f; color:#fff; font-weight: 600; letter-spacing: .5px; }
-    .card { background: #fff; border-radius: 12px; box-shadow: 0 8px 24px rgba(39,79,145,.08); padding: 32px; }
-    .login-card { max-width: 420px; margin: 0 auto; }
-    .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 20px; }
-    .panel-section { background: #f8fbff; border: 1px solid #e1e9f5; border-radius: 10px; padding: 20px; }
-    .panel-title { margin-top: 0; color: #1f3b8f; font-size: 18px; border-bottom: 2px solid #e1e9f5; padding-bottom: 10px; margin-bottom: 15px; }
-    .btn-primary { background:#2e5cff; color:#fff; border: none; font-weight: 600; }
-    .btn-secondary { background:#e9eef9; color:#1f3b8f; border: none; font-weight: 600; }
-    .btn-danger { background:#fff1f0; color:#cf1322; border: 1px solid #ffa39e; font-weight: 600; }
+    df = df.copy()
     
-    /* Tabs */
-    .admin-tabs { display: flex; gap: 10px; margin-bottom: 20px; justify-content: center; }
-    .tab-btn { background: #e9eef9; color: #1f3b8f; padding: 10px 20px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; }
-    .tab-btn.active { background: #1f3b8f; color: #fff; }
-    .tab-content { display: none; }
-    .tab-content.active { display: block; }
+    # 1. Eliminar columnas Unnamed
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
     
-    /* Table */
-    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-    th, td { text-align: left; padding: 10px; border-bottom: 1px solid #eee; }
-    th { background: #f4f8ff; color: #1f3b8f; font-weight: 600; }
-    tr:hover { background: #f9fbff; }
-  </style>
-  <script>
-    function openTab(name) {
-        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        document.getElementById(name).classList.add('active');
-        document.getElementById('btn-' + name).classList.add('active');
-        localStorage.setItem('adminTab', name);
-    }
-    document.addEventListener('DOMContentLoaded', () => {
-        const last = localStorage.getItem('adminTab') || 'procs';
-        openTab(last);
-    });
-  </script>
-</head>
-<body>
-  <div class="container">
-    <div class="brand"><div class="box">IPS GOLEMAN</div></div>
+    # 2. Homogeneizar tipos de datos para evitar Mixed Types
+    for col in df.columns:
+        # Si es tipo objeto, forzar a string y limpiar caracteres raros
+        if df[col].dtype == 'object':
+            df[col] = df[col].astype(str).replace('nan', '')
+            # Eliminar caracteres nulos o de control que rompen Arrow
+            df[col] = df[col].apply(lambda x: re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F]', '', x) if isinstance(x, str) else x)
     
-    {% if not logged %}
-      <div class="card login-card">
-      <h2 style="text-align:center; color:#1f3b8f; margin-top:0;">Acceso Administrativo</h2>
-      <form method="post">
-        <div class="row"><label>Usuario</label><input name="user" required></div>
-        <div class="row"><label>Contraseña</label><input type="password" name="password" required></div>
-        <div class="actions">
-          <button class="btn-primary" type="submit">Ingresar</button>
-          <a href="{{ url_for('index') }}"><button class="btn-secondary" type="button">Volver</button></a>
-          <button class="btn-secondary" type="reset">Limpiar</button>
-        </div>
-      </form>
-      </div>
-    {% else %}
-      <div class="admin-tabs">
-        <button id="btn-procs" class="tab-btn active" onclick="openTab('procs')">Gestión Procedimientos</button>
-        <button id="btn-acts" class="tab-btn" onclick="openTab('acts')">Seguimiento Actividades</button>
-      </div>
+    return df
 
-      <div class="card">
-        <h2 style="margin-top:0; color:#1f3b8f; border-bottom:1px solid #eee; padding-bottom:10px;">Panel de Control</h2>
-        
-        <!-- Tab: Procedimientos -->
-        <div id="procs" class="tab-content active">
-            <div class="dashboard-grid">
-                <!-- Left Panel -->
-                <div class="panel-section">
-                  <h3 class="panel-title">Estadísticas y Descargas</h3>
-                  <div style="font-size:32px; font-weight:bold; color:#1f3b8f; margin-bottom:8px;">{{ record_count }}</div>
-                  <div style="color:#666; margin-bottom:20px;">Registros totales</div>
-                  
-                  <div style="display:flex; flex-direction:column; gap:10px;">
-                    <a href="{{ url_for('download_excel') }}"><button class="btn-primary" type="button">Descargar Excel Completo</button></a>
-                    <a href="{{ url_for('logout') }}"><button class="btn-danger" type="button">Cerrar Sesión</button></a>
-                  </div>
-                </div>
-                
-                <!-- Right Panel: Catalog Upload -->
-                <div class="panel-section">
-                  <h3 class="panel-title">Actualizar Catálogo</h3>
-                  <form method="post" action="{{ url_for('upload_catalog') }}" enctype="multipart/form-data">
-                    <div style="margin-bottom:12px;">
-                      <label style="display:block; margin-bottom:8px; font-size:14px; color:#555;">Archivo Excel (.xlsx)</label>
-                      <input type="file" name="file" accept=".xlsx,.xls" required>
-                    </div>
-                    <button class="btn-secondary" type="submit">Subir y Actualizar</button>
-                  </form>
-                  {% if catalog %}
-                    <div style="margin-top:12px; font-size:13px; color:#0B7A33;">✓ Catálogo activo</div>
-                  {% endif %}
-                  {% if catalog_filename %}
-                    <div style="margin-top:4px; font-size:12px; color:#666; word-break:break-all;">{{ catalog_filename }}</div>
-                  {% endif %}
-                </div>
-            </div>
-            
-            <div class="panel-section" style="margin-top: 24px;">
-                <h3 class="panel-title">Buscar y Editar Registro</h3>
-                <form method="post" action="{{ url_for('search_edit') }}">
-                    <div style="display: flex; gap: 10px; align-items: center;">
-                        <label style="min-width: 60px;">ID:</label>
-                        <input name="search_id" type="number" placeholder="Ingrese ID" required style="width: 150px;">
-                        <button class="btn-primary" type="submit" style="width: auto;">Buscar</button>
-                    </div>
-                </form>
-            </div>
-        </div>
+def find_col(df, candidates):
+    for col in df.columns:
+        if any(cand.lower() in str(col).lower() for cand in candidates):
+            return col
+    return None
 
-        <!-- Tab: Actividades -->
-        <div id="acts" class="tab-content">
-            <div class="panel-section">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; border-bottom:2px solid #e1e9f5; padding-bottom:10px;">
-                    <h3 class="panel-title" style="border:none; margin:0; padding:0;">Control de Actividades</h3>
-                    <div style="font-weight:bold; color:#1f3b8f; font-size:16px;">
-                        Total Registros: {{ activities_count }}
-                        {% if filtered_activities_count is defined and filtered_activities_count != activities_count %}
-                        <span style="font-size:14px; color:#666; font-weight:normal;">(Mostrando: {{ filtered_activities_count }})</span>
-                        {% endif %}
-                    </div>
-                </div>
+def leer_excel(file_obj1, file_obj2=None):
+    if file_obj1 is None and file_obj2 is None:
+        if 'df' in st.session_state and st.session_state.df is not None:
+            return st.session_state.df
+        return cargar_excel()
 
-                <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
-                    <form method="get" action="{{ url_for('admin') }}" style="display:flex; gap:10px; align-items:flex-end; flex:1;">
-                        <input type="hidden" name="tab" value="acts">
-                        <div style="flex:1;">
-                            <label style="display:block; margin-bottom:5px;">Filtrar por Profesional</label>
-                            <select name="filter_prof" onchange="this.form.submit()">
-                                <option value="">Todos los profesionales</option>
-                                {% for p in profs %}
-                                    <option value="{{ p }}" {% if filter_prof == p %}selected{% endif %}>{{ p }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div style="flex:1;">
-                            <label style="display:block; margin-bottom:5px;">Filtrar por Fecha</label>
-                            <input type="date" name="filter_date" value="{{ filter_date }}" onchange="this.form.submit()">
-                        </div>
-                        <button class="btn-secondary" type="submit" style="width:auto;">Filtrar</button>
-                    </form>
-                    <a href="{{ url_for('download_activities') }}" style="text-decoration:none;">
-                        <button class="btn-primary" type="button" style="width:auto;">Descargar Todo (.xlsx)</button>
-                    </a>
-                </div>
-            </div>
-            
-            <div style="margin-top:20px; overflow-x:auto;">
-                <table>
-                    <thead>
-                        <tr>
-                            <th style="width:50px;">ID</th>
-                            <th style="width:100px;">Fecha</th>
-                            <th>Nombre Profesional</th>
-                            <th>Actividad / Observación</th>
-                            <th style="width:80px;">Acción</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for act in activities %}
-                        <tr>
-                            <td>{{ act.ID }}</td>
-                            <td>{{ act.Fecha }}</td>
-                            <td>{{ act['Nombre profesional'] }}</td>
-                            <td>{{ act.Actividad }}</td>
-                            <td style="text-align:center;">
-                                <form method="post" action="{{ url_for('delete_activity', id=act.ID) }}" onsubmit="return confirm('¿Está seguro de eliminar esta actividad?');" style="margin:0;">
-                                    <button class="btn-danger" type="submit" style="padding:4px 8px; font-size:12px;">Eliminar</button>
-                                </form>
-                            </td>
-                        </tr>
-                        {% else %}
-                        <tr><td colspan="4" style="text-align:center; padding:20px; color:#666;">No hay actividades registradas.</td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-      </div>
-    {% endif %}
-    
-    {% if status %}
-      <div class="status">{{ status }}</div>
-    {% endif %}
-    
-  </div>
-</body>
-</html>
-"""
-
-@app.route('/')
-def index():
-    load_catalog()
-    return render_template_string(PAGE_FORM, status=None, ok=True, vals={'fecha_inicio': datetime.now().strftime('%Y-%m-%d')}, catalog=CATALOG, prof_map_json=json.dumps(CATALOG.get('prof_map', {}), ensure_ascii=False))
-
-@app.route('/actividades')
-def activities():
-    load_catalog()
-    return render_template_string(PAGE_ACTIVITIES, status=None, ok=True, vals={'fecha': datetime.now().strftime('%Y-%m-%d')}, catalog=CATALOG)
-
-@app.route('/save_activity', methods=['POST'])
-def save_activity():
-    payload = {
-        'id': request.form.get('id', '').strip(),
-        'fecha': request.form.get('fecha', '').strip(),
-        'nombre_prof': request.form.get('nombre_prof', '').strip(),
-        'actividad': request.form.get('actividad', '').strip()
-    }
-    
-    # Exclude ID from check
-    if not all([payload['fecha'], payload['nombre_prof'], payload['actividad']]):
-        load_catalog()
-        return render_template_string(PAGE_ACTIVITIES, status='Complete todos los campos', ok=False, vals=payload, catalog=CATALOG)
-        
-    ensure_activities_file()
-    sync_activities_db()
-    
     try:
-        df = pd.read_csv(DATA_ACTIVITIES_PATH)
-    except Exception:
-        df = pd.DataFrame(columns=DATA_ACTIVITIES_HEADERS)
+        df1 = pd.DataFrame()
+        df2 = pd.DataFrame()
+
+        if file_obj1 is not None:
+            df1 = pd.read_excel(file_obj1, engine="openpyxl")
         
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    # If ID exists, we are editing
-    status_msg = ""
-    if payload['id']:
-        try:
-            edit_id = int(payload['id'])
-            if 'ID' in df.columns and edit_id in df['ID'].values:
-                # Update existing row
-                idx = df.index[df['ID'] == edit_id].tolist()[0]
-                df.at[idx, 'Fecha'] = payload['fecha']
-                df.at[idx, 'Nombre profesional'] = payload['nombre_prof']
-                df.at[idx, 'Actividad'] = payload['actividad']
-                if 'Modificado' in df.columns:
-                    df.at[idx, 'Modificado'] = now_str
-                status_msg = "Actividad actualizada correctamente"
+        if file_obj2 is not None:
+            df2 = pd.read_excel(file_obj2, engine="openpyxl")
+
+        # Limpieza preliminar
+        col_prof1 = find_col(df1, ["profesional", "nombre profesional"])
+        if col_prof1:
+             df1[col_prof1] = df1[col_prof1].astype(str).str.replace(r'^\d+\s*[-]?\s*', '', regex=True).str.strip()
+
+        # Consolidación
+        if not df1.empty and not df2.empty:
+            col_code1 = find_col(df1, ["codigo procedimiento", "cod procedimiento", "codigo", "cups"])
+            col_code2 = find_col(df2, ["codigo procedimiento", "cod procedimiento", "codigo", "cups"])
+            
+            col_name1 = find_col(df1, ["nombre procedimiento", "procedimiento", "descripcion", "nombre"])
+            col_name2 = find_col(df2, ["nombre procedimiento", "procedimiento", "descripcion", "nombre"])
+            
+            col_val_unit2 = find_col(df2, ["valor unitario", "valor_unitario", "precio", "valor"])
+
+            if col_val_unit2 and (col_code1 and col_code2 or col_name1 and col_name2):
+                st.info(f"Consolidando archivos con búsqueda inteligente...")
+                
+                if col_code1: df1['_temp_code'] = df1[col_code1].astype(str).str.strip()
+                if col_code2: df2['_temp_code'] = df2[col_code2].astype(str).str.strip()
+                
+                if col_name1: df1['_temp_name'] = df1[col_name1].astype(str).str.strip().str.lower()
+                if col_name2: df2['_temp_name'] = df2[col_name2].astype(str).str.strip().str.lower()
+                
+                df1['__Valor_Encontrado__'] = None
+                
+                if col_code1 and col_code2:
+                    df2_clean = df2.dropna(subset=[col_val_unit2])
+                    df2_unique = df2_clean.drop_duplicates(subset=['_temp_code'])
+                    price_map_code = df2_unique.set_index('_temp_code')[col_val_unit2].to_dict()
+                    df1['__Valor_Encontrado__'] = df1['_temp_code'].map(price_map_code)
+                
+                if col_name1 and col_name2:
+                    df2_clean = df2.dropna(subset=[col_val_unit2])
+                    df2_unique = df2_clean.drop_duplicates(subset=['_temp_name'])
+                    price_map_name = df2_unique.set_index('_temp_name')[col_val_unit2].to_dict()
+                    mask_missing = df1['__Valor_Encontrado__'].isna()
+                    df1.loc[mask_missing, '__Valor_Encontrado__'] = df1.loc[mask_missing, '_temp_name'].map(price_map_name)
+                
+                col_val_unit1 = find_col(df1, ["valor unitario", "valor_unitario", "precio unitario"])
+                if not col_val_unit1:
+                     col_val_unit1 = "Valor Unitario"
+                     if col_val_unit1 not in df1.columns:
+                        df1[col_val_unit1] = 0.0
+                
+                vals_nuevos = pd.to_numeric(df1['__Valor_Encontrado__'], errors='coerce')
+                vals_actuales = pd.to_numeric(df1[col_val_unit1], errors='coerce').fillna(0)
+                df1[col_val_unit1] = vals_nuevos.combine_first(vals_actuales)
+                
+                col_qty1 = find_col(df1, ["cantidad", "cant"])
+                if col_qty1:
+                    qtys = pd.to_numeric(df1[col_qty1], errors='coerce').fillna(1)
+                else:
+                    qtys = 1
+                
+                col_total1 = find_col(df1, ["valor total", "total", "valor neto", "neto", "valor"])
+                if not col_total1:
+                    col_total1 = "Valor"
+                
+                val_unit_safe = pd.to_numeric(df1[col_val_unit1], errors='coerce').fillna(0)
+                df1[col_total1] = val_unit_safe * qtys
+                
+                for tmp in ['_temp_code', '_temp_name', '__Valor_Encontrado__']:
+                    if tmp in df1.columns:
+                        df1.drop(columns=[tmp], inplace=True)
+                
+                df = df1
+            
+                # Guardado seguro
+                try:
+                    consolidados_viejos = glob.glob("archivo_consolidado*.xlsx")
+                    for f_old in consolidados_viejos:
+                        try:
+                            os.remove(f_old)
+                        except:
+                            pass
+
+                    if 'Valor_Unitario_Ref' in df.columns:
+                        df = df.drop(columns=['Valor_Unitario_Ref'])
+                    
+                    df_export = df.copy()
+                    df_export = df_export.loc[:, ~df_export.columns.duplicated()]
+                    df_export.columns = df_export.columns.astype(str).str.strip()
+
+                    for col in df_export.columns:
+                        col_lower = col.lower()
+                        if "fecha" in col_lower or "inicio" in col_lower or "fin" in col_lower or pd.api.types.is_datetime64_any_dtype(df_export[col]):
+                            try:
+                                df_export[col] = pd.to_datetime(df_export[col], errors='coerce', dayfirst=True, format='mixed')
+                            except:
+                                pass
+                        elif "profesional" in col_lower:
+                            try:
+                                df_export[col] = df_export[col].astype(str).str.replace(r'^\d+\s*[-]?\s*', '', regex=True).str.strip()
+                            except:
+                                pass
+                        elif col == col_val_unit1 or col == col_total1:
+                             df_export[col] = pd.to_numeric(df_export[col], errors='coerce').fillna(0)
+                        elif df_export[col].dtype == 'object':
+                            df_export[col] = df_export[col].fillna("").astype(str)
+                            df_export[col] = df_export[col].apply(lambda x: re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F]', '', x))
+                            df_export[col] = df_export[col].apply(lambda x: "'" + x if str(x).startswith("=") else x)
+                            df_export[col] = df_export[col].str.slice(0, 32700)
+
+                    output_path = "archivo_consolidado.xlsx"
+                    if os.path.exists(output_path):
+                        try:
+                            os.remove(output_path)
+                        except:
+                            output_path = f"archivo_consolidado_{int(datetime.now().timestamp())}.xlsx"
+
+                    try:
+                        with pd.ExcelWriter(output_path, engine='xlsxwriter', engine_kwargs={'options': {'nan_inf_to_errors': True}}, date_format='dd/mm/yyyy', datetime_format='dd/mm/yyyy') as writer:
+                             df_export.to_excel(writer, index=False)
+                    except:
+                        df_export.to_excel(output_path, index=False, engine='openpyxl')
+                    
+                    st.success("✅ Archivo consolidado generado exitosamente.")
+                    st.session_state['consolidado_path'] = output_path
+                    
+                    # Forzar actualización de timestamp para que otros usuarios recarguen
+                    if os.path.exists(output_path):
+                        # "Touch" el archivo para asegurar cambio de fecha si fue muy rápido
+                        os.utime(output_path, None)
+
+                except Exception as e:
+                    st.error(f"Error generando consolidado: {e}")
+            
             else:
-                # Fallback if ID not found
-                return render_template_string(PAGE_ACTIVITIES, status='Error: ID de actividad no encontrado', ok=False, vals=payload, catalog=CATALOG)
-        except ValueError:
-            return render_template_string(PAGE_ACTIVITIES, status='Error: ID inválido', ok=False, vals=payload, catalog=CATALOG)
-    else:
-        # Create new
-        new_id = df['ID'].max() + 1 if not df.empty and 'ID' in df.columns and not df['ID'].isnull().all() else 1
-        if pd.isna(new_id): new_id = 1
-        
-        new_row = {
-            'ID': int(new_id),
-            'Fecha': payload['fecha'],
-            'Nombre profesional': payload['nombre_prof'],
-            'Actividad': payload['actividad'],
-            'Creado': now_str,
-            'Modificado': ''
-        }
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        status_msg = "Actividad guardada correctamente"
-    
-    df.to_csv(DATA_ACTIVITIES_PATH, index=False)
-    update_activities_excel_file()
-    
-    load_catalog()
-    # Reset form after save but keep user in loop if they want
-    return render_template_string(PAGE_ACTIVITIES, status=status_msg, ok=True, vals={'fecha': datetime.now().strftime('%Y-%m-%d')}, catalog=CATALOG)
+                st.warning("No se encontraron columnas para consolidar. Concatenando...")
+                df = pd.concat([df1, df2], ignore_index=True)
 
-@app.route('/search_activities_public', methods=['GET'])
-def search_activities_public():
-    load_catalog()
-    search_prof = request.args.get('search_prof', '').strip()
-    my_activities = []
-    
-    if search_prof:
-        ensure_activities_file()
-        sync_activities_db()
-        try:
-            df = pd.read_csv(DATA_ACTIVITIES_PATH)
-            if 'Nombre profesional' in df.columns:
-                df_filtered = df[df['Nombre profesional'] == search_prof]
-                if not df_filtered.empty:
-                    if 'Fecha' in df.columns:
-                        df_filtered = df_filtered.sort_values(by='Fecha', ascending=False)
-                    my_activities = df_filtered.to_dict('records')
-        except Exception as e:
-            print(f"Error searching activities: {e}")
-            
-    return render_template_string(PAGE_ACTIVITIES, status=None, ok=True, vals={'fecha': datetime.now().strftime('%Y-%m-%d')}, catalog=CATALOG, search_prof=search_prof, my_activities=my_activities)
-
-@app.route('/edit_activity_prep', methods=['POST'])
-def edit_activity_prep():
-    load_catalog()
-    act_id = request.form.get('id')
-    vals = {'fecha': datetime.now().strftime('%Y-%m-%d')}
-    
-    if act_id:
-        ensure_activities_file()
-        sync_activities_db()
-        try:
-            df = pd.read_csv(DATA_ACTIVITIES_PATH)
-            df_item = df[df['ID'] == int(act_id)]
-            if not df_item.empty:
-                item = df_item.iloc[0]
-                vals = {
-                    'id': item['ID'],
-                    'fecha': item['Fecha'],
-                    'nombre_prof': item['Nombre profesional'],
-                    'actividad': item['Actividad']
-                }
-        except Exception as e:
-            print(f"Error prepping edit: {e}")
-
-    return render_template_string(PAGE_ACTIVITIES, status="Modificando actividad ID: " + str(act_id), ok=True, vals=vals, catalog=CATALOG)
-
-@app.route('/delete_activity/<int:id>', methods=['POST'])
-def delete_activity(id):
-    if not session.get('admin'):
-        return redirect(url_for('admin'))
-        
-    ensure_activities_file()
-    sync_activities_db()
-    
-    try:
-        df = pd.read_csv(DATA_ACTIVITIES_PATH)
-        if 'ID' in df.columns:
-            # Filter out the row with the given ID
-            df = df[df['ID'] != id]
-            df.to_csv(DATA_ACTIVITIES_PATH, index=False)
-            
-            # Update Excel immediately to keep sync
-            update_activities_excel_file()
-    except Exception as e:
-        print(f"Error deleting activity: {e}")
-        
-    return redirect(url_for('admin', tab='acts'))
-
-@app.route('/save', methods=['POST'])
-def save():
-    payload = {k: request.form.get(k, '').strip() for k in ['id', 'nombre_prof','doc_prof','nombre_pac','doc_pac','fecha_inicio','municipio','procedimiento','panacea','novedad']}
-    err = validate_payload(payload)
-    if err:
-        load_catalog()
-        return render_template_string(PAGE_FORM, status=err, ok=False, vals=payload, catalog=CATALOG, prof_map_json=json.dumps(CATALOG.get('prof_map', {}), ensure_ascii=False))
-    ensure_data_file()
-    
-    rec_id = payload.get('id')
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    final_id = None
-    
-    try:
-        df = pd.read_csv(DATA_PATH)
-    except Exception:
-        df = pd.DataFrame(columns=DATA_HEADERS)
-
-    # Ensure ID column is numeric
-    if 'ID' in df.columns:
-        df['ID'] = pd.to_numeric(df['ID'], errors='coerce').fillna(0).astype(int)
-
-    if rec_id and rec_id.isdigit():
-        # Update existing
-        rec_id = int(rec_id)
-        idx = df.index[df['ID'] == rec_id].tolist()
-        if idx:
-            i = idx[0]
-            df.at[i, 'Nombre profesional'] = payload['nombre_prof']
-            df.at[i, 'Documento profesional'] = payload['doc_prof']
-            df.at[i, 'Nombre paciente'] = payload['nombre_pac']
-            df.at[i, 'Documento paciente'] = payload['doc_pac']
-            df.at[i, 'Fecha inicio'] = payload['fecha_inicio']
-            df.at[i, 'Municipio'] = payload['municipio']
-            df.at[i, 'Procedimiento'] = payload['procedimiento']
-            df.at[i, 'Subido a Panacea'] = 'Sí' if payload['panacea'] in ('Sí','Si') else 'No'
-            df.at[i, 'Novedad'] = payload['novedad']
-            df.at[i, 'Modificado'] = now_str
-            final_id = rec_id
-            msg = f'Actualizado correctamente. ID: {final_id}'
+        elif not df1.empty:
+            df = df1
+        elif not df2.empty:
+            df = df2
         else:
-            # ID provided but not found? Treat as new or error. Let's treat as new for safety or error?
-            # User expects to edit. If not found, maybe deleted.
-            # Let's fallback to create new to preserve data
-            rec_id = None
-    
-    if not final_id:
-        # Create new
-        new_id = df['ID'].max() + 1 if not df.empty and 'ID' in df.columns and not df['ID'].isnull().all() else 1
-        if pd.isna(new_id): new_id = 1
-        new_row = {
-            'ID': int(new_id),
-            'Nombre profesional': payload['nombre_prof'],
-            'Documento profesional': payload['doc_prof'],
-            'Nombre paciente': payload['nombre_pac'],
-            'Documento paciente': payload['doc_pac'],
-            'Fecha inicio': payload['fecha_inicio'],
-            'Municipio': payload['municipio'],
-            'Procedimiento': payload['procedimiento'],
-            'Subido a Panacea': 'Sí' if payload['panacea'] in ('Sí','Si') else 'No',
-            'Novedad': payload['novedad'],
-            'Creado': now_str,
-            'Modificado': ''
-        }
-        # Append using loc or concat
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        final_id = int(new_id)
-        msg = f'Guardado exitosamente. Su ID es: {final_id}'
+            return st.session_state.get('df') or cargar_excel()
 
-    # Save CSV
-    if 'Fecha inicio' in df.columns:
-        df['Fecha inicio'] = pd.to_datetime(df['Fecha inicio'], errors='coerce')
-    sort_cols = [c for c in ['Fecha inicio','Municipio','Nombre paciente'] if c in df.columns]
-    if sort_cols:
-        df = df.sort_values(by=sort_cols, ascending=[True, True, True], na_position='last')
-    
-    # Re-save with all headers
-    df = df.reindex(columns=DATA_HEADERS)
-    df.to_csv(DATA_PATH, index=False)
-
-    update_excel_file()
-    load_catalog()
-    return render_template_string(PAGE_FORM, status=msg, ok=True, vals={}, catalog=CATALOG, prof_map_json=json.dumps(CATALOG.get('prof_map', {}), ensure_ascii=False))
-
-@app.route('/search_public', methods=['POST'])
-def search_public():
-    search_id = request.form.get('search_id')
-    if not search_id:
-        return redirect(url_for('index'))
-    
-    ensure_data_file()
-    try:
-        df = pd.read_csv(DATA_PATH)
-        if 'ID' in df.columns:
-            df['ID'] = pd.to_numeric(df['ID'], errors='coerce').fillna(0).astype(int)
+        df.columns = df.columns.astype(str).str.strip()
+        # Limpiar columnas Unnamed que causan error Arrow
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
         
-        record = df[df['ID'] == int(search_id)]
-        if record.empty:
-            load_catalog()
-            return render_template_string(PAGE_FORM, status=f'ID {search_id} no encontrado', ok=False, vals={}, catalog=CATALOG, prof_map_json=json.dumps(CATALOG.get('prof_map', {}), ensure_ascii=False))
+        st.session_state.df = df
+        guardar_excel(df)
+        guardar_fecha_actualizacion()
         
-        row = record.iloc[0]
-        vals = {
-            'id': str(row['ID']),
-            'nombre_prof': str(row['Nombre profesional']) if pd.notna(row['Nombre profesional']) else '',
-            'doc_prof': str(row['Documento profesional']) if pd.notna(row['Documento profesional']) else '',
-            'nombre_pac': str(row['Nombre paciente']) if pd.notna(row['Nombre paciente']) else '',
-            'doc_pac': str(row['Documento paciente']) if pd.notna(row['Documento paciente']) else '',
-            'fecha_inicio': str(row['Fecha inicio']).split(' ')[0] if pd.notna(row['Fecha inicio']) else '',
-            'municipio': str(row['Municipio']) if pd.notna(row['Municipio']) else '',
-            'procedimiento': str(row['Procedimiento']) if pd.notna(row['Procedimiento']) else '',
-            'panacea': str(row['Subido a Panacea']) if pd.notna(row['Subido a Panacea']) else '',
-            'novedad': str(row['Novedad']) if pd.notna(row['Novedad']) else ''
-        }
-        
-        load_catalog()
-        return render_template_string(PAGE_FORM, status=f'Editando registro ID: {search_id}', ok=True, vals=vals, edit_mode=True, catalog=CATALOG, prof_map_json=json.dumps(CATALOG.get('prof_map', {}), ensure_ascii=False))
-        
+        return df
     except Exception as e:
-        print(e)
-        return redirect(url_for('index'))
+        st.error(f"Error leyendo archivos: {e}")
+        return st.session_state.get('df')
 
-@app.route('/admin', methods=['GET','POST'])
-def admin():
-    if request.method == 'POST':
-        u = request.form.get('user','')
-        p = request.form.get('password','')
-        if ADMIN_USER and ADMIN_PASS:
-            valid = (u == ADMIN_USER and p == ADMIN_PASS)
-        else:
-            valid = (u == 'admin' and p == 'admin')
-        if valid:
-            session['admin'] = True
-            return redirect(url_for('admin'))
-        return render_template_string(PAGE_ADMIN, logged=False, status='Credenciales inválidas', ok=False, catalog={}, record_count=0, catalog_filename=None)
-    
-    logged = session.get('admin') is True
-    load_catalog()
-    
-    count = 0
-    if os.path.exists(DATA_PATH):
-        try:
-            with open(DATA_PATH, 'r', encoding='utf-8') as f:
-                rows = sum(1 for line in f)
-                count = max(0, rows - 1)
-        except Exception:
-            count = 0
-
-    catalog_filename = None
-    if CATALOG.get('catalog_file_path'):
-        catalog_filename = os.path.basename(CATALOG.get('catalog_file_path'))
-        
-    # Activities Data
-    activities = []
-    profs = []
-    activities_count = 0
-    filtered_activities_count = 0
-    filter_prof = request.args.get('filter_prof', '').strip()
-    filter_date = request.args.get('filter_date', '').strip()
-    
-    ensure_activities_file()
-    sync_activities_db()
-    try:
-        df_act = pd.read_csv(DATA_ACTIVITIES_PATH)
-        if not df_act.empty:
-            activities_count = len(df_act)
-            # Get unique professionals for filter
-            if 'Nombre profesional' in df_act.columns:
-                profs = sorted(df_act['Nombre profesional'].dropna().unique().tolist())
-            
-            # Apply filters
-            if filter_prof:
-                df_act = df_act[df_act['Nombre profesional'] == filter_prof]
-            
-            if filter_date:
-                if 'Fecha' in df_act.columns:
-                    df_act = df_act[df_act['Fecha'] == filter_date]
-
-            filtered_activities_count = len(df_act)
-            
-            # Sort by ID desc
-            if 'ID' in df_act.columns:
-                df_act = df_act.sort_values(by='ID', ascending=False)
-                
-            activities = df_act.to_dict('records')
-    except Exception as e:
-        print(f"Error loading activities: {e}")
-        activities = []
-
-    return render_template_string(PAGE_ADMIN, logged=logged, status=None, ok=True, catalog=CATALOG, record_count=count, catalog_filename=catalog_filename, activities=activities, profs=profs, filter_prof=filter_prof, filter_date=filter_date, activities_count=activities_count, filtered_activities_count=filtered_activities_count)
-
-@app.route('/logout')
-def logout():
-    session.pop('admin', None)
-    return redirect(url_for('index'))
-
-@app.route('/download')
-def download_excel():
-    if not session.get('admin'):
-        return redirect(url_for('admin'))
-    
-    try:
-        # Generate fresh Excel in memory
-        output = generate_excel_bytes()
-        return send_file(
-            output, 
-            as_attachment=True, 
-            download_name='registros_procedimientos.xlsx', 
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-    except Exception as e:
-        return f"Error generando archivo: {e}", 500
-
-@app.route('/download_activities')
-def download_activities():
-    if not session.get('admin'):
-        return redirect(url_for('admin'))
-    
-    try:
-        sync_activities_db()
-        # Generate fresh Activities Excel in memory
-        output = generate_activities_excel_bytes()
-        return send_file(
-            output, 
-            as_attachment=True, 
-            download_name='registros_actividades.xlsx', 
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-    except Exception as e:
-        return f"Error generando archivo: {e}", 500
-
-def extract_catalog(df):
-    cols = {c.lower().strip(): c for c in df.columns}
-    def get_unique(colnames):
-        for c in colnames:
-            key = c.lower().strip()
-            if key in cols:
-                return sorted([str(x).strip() for x in df[cols[key]].dropna().unique() if str(x).strip() != ''])
+# ===================== HELPERS DROPDOWNS =====================
+def get_dropdown_options(df, keywords):
+    if df is None:
         return []
-    prof_name_col = None
-    for c in ['Nombre profesional','Profesional','Nombre del profesional']:
-        k = c.lower().strip()
-        if k in cols:
-            prof_name_col = cols[k]
-            break
-    prof_doc_col = None
-    for c in ['Documento profesional','Doc profesional','Documento del profesional']:
-        k = c.lower().strip()
-        if k in cols:
-            prof_doc_col = cols[k]
-            break
-    prof_map = {}
-    if prof_name_col and prof_doc_col:
-        try:
-            for _, row in df[[prof_name_col, prof_doc_col]].dropna().iterrows():
-                n = str(row[prof_name_col]).strip()
-                d = str(row[prof_doc_col]).strip()
-                if n and d:
-                    prof_map[n] = d
-        except Exception:
-            prof_map = {}
-    return {
-        'nombre_prof': get_unique(['Nombre profesional','Profesional','Nombre del profesional']),
-        'doc_prof': get_unique(['Documento profesional','Doc profesional','Documento del profesional']),
-        'nombre_pac': get_unique(['Nombre paciente','Paciente','Nombre del paciente']),
-        'doc_pac': get_unique(['Documento paciente','Doc paciente','Documento del paciente']),
-        'municipio': get_unique(['Municipio','Ciudad','Localidad']),
-        'procedimiento': get_unique(['Procedimiento','Nombre procedimiento','Servicio']),
-        'prof_map': prof_map
-    }
+    col = next((c for c in df.columns if any(k in str(c).lower() for k in keywords)), None)
+    if col:
+        serie = df[col]
+        if isinstance(serie, pd.DataFrame): serie = serie.iloc[:, 0]
+        serie = serie.astype(str).str.strip()
+        mapa = {v.lower(): v for v in serie.dropna()}
+        return sorted(mapa.values())
+    return []
 
-@app.route('/search_edit', methods=['POST'])
-def search_edit():
-    if not session.get('admin'):
-        return redirect(url_for('admin'))
+# ===================== FILTROS =====================
+def filtrar_datos(df, nombre_prof, fecha_inicio, fecha_fin, procedimiento, ciudad):
+    aviso = ""
+    if df is None:
+        return pd.DataFrame(), aviso
+
+    df_filtrado = df.copy()
+
+    # Filtro Profesional
+    col_profesional = next((c for c in df.columns if "profesional" in str(c).lower()), None)
+    if nombre_prof and col_profesional:
+        df_filtrado = df_filtrado[df_filtrado[col_profesional].astype(str).str.strip().str.lower() == str(nombre_prof).strip().lower()]
+
+    # Filtro Procedimiento
+    col_procedimiento = next((c for c in df.columns if "nombre procedimiento" in str(c).lower()), None)
+    if procedimiento and col_procedimiento:
+        df_filtrado = df_filtrado[df_filtrado[col_procedimiento].astype(str).str.strip().str.lower() == str(procedimiento).strip().lower()]
     
-    search_id = request.form.get('search_id')
-    if not search_id:
-        return redirect(url_for('admin'))
+    # Filtro Ciudad
+    col_ciudad = next((c for c in df.columns if "ciudad" in str(c).lower() or "municipio" in str(c).lower()), None)
+    if not col_ciudad:
+        col_ciudad = next((c for c in df.columns if "sede" in str(c).lower()), None)
         
-    ensure_data_file()
-    try:
-        df = pd.read_csv(DATA_PATH)
-        # Ensure ID column is numeric
-        if 'ID' in df.columns:
-            df['ID'] = pd.to_numeric(df['ID'], errors='coerce').fillna(0).astype(int)
-            
-        record = df[df['ID'] == int(search_id)]
-        if record.empty:
-            # Not found
-            # Need to pass status back to admin. 
-            # For simplicity, render admin with error.
-            # We need to reload catalog stuff for admin view
-            load_catalog()
-            count = 0
-            if os.path.exists(DATA_PATH):
-                 with open(DATA_PATH, 'r', encoding='utf-8') as f:
-                    count = max(0, sum(1 for line in f) - 1)
-            
-            catalog_filename = None
-            if CATALOG.get('catalog_file_path'):
-                catalog_filename = os.path.basename(CATALOG.get('catalog_file_path'))
+    if ciudad and col_ciudad:
+        df_filtrado = df_filtrado[df_filtrado[col_ciudad].astype(str).str.strip().str.lower() == str(ciudad).strip().lower()]
 
-            return render_template_string(PAGE_ADMIN, logged=True, status=f'ID {search_id} no encontrado', ok=False, catalog=CATALOG, record_count=count, catalog_filename=catalog_filename)
+    # Filtro Fechas
+    col_fecha = next((c for c in df.columns if "fecha" in str(c).lower()), None)
+    if col_fecha:
+        try:
+            fechas_series = pd.to_datetime(df_filtrado[col_fecha], errors="coerce", dayfirst=True).dt.date
+            mask = pd.Series(True, index=df_filtrado.index)
+            if fecha_inicio:
+                mask = mask & (fechas_series >= fecha_inicio)
+            if fecha_fin:
+                mask = mask & (fechas_series <= fecha_fin)
+            df_filtrado = df_filtrado[mask]
+        except Exception as e:
+            aviso += f"⚠️ Error con fechas: {e}"
+    else:
+        aviso += "⚠️ No hay columna de fecha."
         
-        # Found, prepare vals
-        row = record.iloc[0]
-        vals = {
-            'id': str(row['ID']),
-            'nombre_prof': str(row['Nombre profesional']) if pd.notna(row['Nombre profesional']) else '',
-            'doc_prof': str(row['Documento profesional']) if pd.notna(row['Documento profesional']) else '',
-            'nombre_pac': str(row['Nombre paciente']) if pd.notna(row['Nombre paciente']) else '',
-            'doc_pac': str(row['Documento paciente']) if pd.notna(row['Documento paciente']) else '',
-            'fecha_inicio': str(row['Fecha inicio']).split(' ')[0] if pd.notna(row['Fecha inicio']) else '',
-            'municipio': str(row['Municipio']) if pd.notna(row['Municipio']) else '',
-            'procedimiento': str(row['Procedimiento']) if pd.notna(row['Procedimiento']) else '',
-            'panacea': str(row['Subido a Panacea']) if pd.notna(row['Subido a Panacea']) else '',
-            'novedad': str(row['Novedad']) if pd.notna(row['Novedad']) else ''
-        }
+    return df_filtrado, aviso
+
+def calcular_totales(df):
+    col_valor = next((c for c in df.columns if str(c).strip().lower() == "valor"), None)
+    if not col_valor:
+         col_valor = next((c for c in df.columns if "valor" in str(c).lower()), None)
+    
+    if col_valor:
+        serie = pd.to_numeric(df[col_valor], errors="coerce")
+        total_valor = serie[serie > 0].sum(skipna=True)
+        return total_valor
+    return 0
+
+# ===================== UI LOGIN =====================
+# REMOVED GLOBAL SESSION STATE INIT to avoid top-level execution risks
+# if 'usuario' not in st.session_state:
+#     st.session_state.usuario = None
+
+def login():
+    load_css()
+    load_login_css()
+    
+    st.markdown("""
+    <div class='login-box'>
+        <h1 style='color:#005f73; margin:0;'>🏥 IPS GOLEMAN</h1>
+        <p style='color:#555; font-size:1.1em;'>Sistema de Facturación y Análisis</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col_l1, col_l2, col_l3 = st.columns([1, 2, 1])
+    with col_l2:
+        with st.form("login_form"):
+            st.markdown("<h3 style='text-align:center; color:#005f73;'>Iniciar Sesión</h3>", unsafe_allow_html=True)
+            user = st.text_input("Usuario")
+            password = st.text_input("Contraseña", type="password")
+            st.markdown("<br>", unsafe_allow_html=True)
+            submit = st.form_submit_button("Acceder")
+            
+            if submit:
+                if user in ["admin", "cristian"] and password == "123":
+                    st.session_state.usuario = user
+                    st.rerun()
+                else:
+                    st.error("❌ Usuario o contraseña incorrectos")
+
+def set_user_offline(username):
+    """Marca a un usuario como desconectado inmediatamente"""
+    try:
+        status_data = {}
+        if os.path.exists(STATUS_FILE):
+            try:
+                with open(STATUS_FILE, "r") as f:
+                    status_data = json.load(f)
+            except:
+                pass
         
-        load_catalog()
-        # Render PAGE_FORM with vals. We need to indicate it's edit mode visually? 
-        # The ID hidden field handles logic. 
-        # Maybe add a status message "Editando registro ID X"
-        return render_template_string(PAGE_FORM, status=f'Editando registro ID: {search_id}', ok=True, vals=vals, catalog=CATALOG, prof_map_json=json.dumps(CATALOG.get('prof_map', {}), ensure_ascii=False))
+        # Establecer tiempo en 0 para desconexión inmediata
+        status_data[username] = 0
         
+        with open(STATUS_FILE, "w") as f:
+            json.dump(status_data, f)
+    except:
+        pass
+
+def logout():
+    if st.session_state.usuario:
+        set_user_offline(st.session_state.usuario)
+    st.session_state.usuario = None
+    st.rerun()
+
+def eliminar_consolidado():
+    try:
+        if os.path.exists("archivo_consolidado.xlsx"):
+            os.remove("archivo_consolidado.xlsx")
+        if os.path.exists("base_guardada.xlsx"):
+            os.remove("base_guardada.xlsx")
+        st.session_state.df = None
+        st.session_state.df_ciudades = None
+        st.success("✅ Consolidado eliminado y datos reiniciados.")
+        time.sleep(1)
+        st.rerun()
     except Exception as e:
-        # Error
-        print(e)
-        return redirect(url_for('admin'))
+        st.error(f"Error al eliminar: {e}")
 
-@app.route('/admin/upload', methods=['POST'])
-def upload_catalog():
-    if not session.get('admin'):
-        return redirect(url_for('admin'))
-    file = request.files.get('file')
-    if not file:
-        return render_template_string(PAGE_ADMIN, logged=True, status='Seleccione un archivo', ok=False, catalog=CATALOG, record_count=0, catalog_filename=None)
+# ===================== GESTIÓN DE USUARIOS Y ESTADO =====================
+USERS_LIST = ["admin", "cristian"]
+STATUS_FILE = "users_status.json"
+
+def update_user_status(username):
     try:
-        filename = file.filename or 'catalogo.xlsx'
-        ext = os.path.splitext(filename)[1].lower()
-        if ext not in ('.xlsx', '.xls'):
-            return render_template_string(PAGE_ADMIN, logged=True, status='Formato no soportado', ok=False, catalog=CATALOG, record_count=0, catalog_filename=None)
-        os.makedirs(UPLOADS_DIR, exist_ok=True)
-        saved_path = os.path.join(UPLOADS_DIR, 'catalogo_formulario' + ext)
-        file.save(saved_path)
-        df = pd.read_excel(saved_path)
-        cat = extract_catalog(df)
-        cat['catalog_file_path'] = saved_path
-        save_catalog(cat)
-        load_catalog()
+        status_data = {}
+        if os.path.exists(STATUS_FILE):
+            try:
+                with open(STATUS_FILE, "r") as f:
+                    status_data = json.load(f)
+            except:
+                pass
         
-        count = 0
-        if os.path.exists(DATA_PATH):
-             with open(DATA_PATH, 'r', encoding='utf-8') as f:
-                count = max(0, sum(1 for line in f) - 1)
+        status_data[username] = time.time()
+        
+        with open(STATUS_FILE, "w") as f:
+            json.dump(status_data, f)
+    except:
+        pass
 
-        catalog_filename = os.path.basename(saved_path)
-        return render_template_string(PAGE_ADMIN, logged=True, status='Catálogo cargado', ok=True, catalog=CATALOG, record_count=count, catalog_filename=catalog_filename)
-    except Exception:
-        return render_template_string(PAGE_ADMIN, logged=True, status='Error leyendo Excel', ok=False, catalog=CATALOG, record_count=0, catalog_filename=None)
+def get_users_status():
+    status_data = {}
+    if os.path.exists(STATUS_FILE):
+        try:
+            with open(STATUS_FILE, "r") as f:
+                status_data = json.load(f)
+        except:
+            pass
+    
+    current_time = time.time()
+    results = []
+    
+    for user in USERS_LIST:
+        last_seen = status_data.get(user, 0)
+        # Si se ha visto en los últimos 5 minutos (300 segundos), está online
+        is_online = (current_time - last_seen) < 300 
+        results.append({"Usuario": user, "Estado": "En Línea" if is_online else "Desconectado", "Online": is_online})
+        
+    return pd.DataFrame(results)
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5028)), debug=False)
+@st.fragment(run_every=5)
+def render_user_status_panel():
+    df_status = get_users_status()
+    
+    # Mostrar como tarjetas o tabla estilizada
+    col_u1, col_u2 = st.columns(2)
+    
+    for index, row in df_status.iterrows():
+        with col_u1 if index % 2 == 0 else col_u2:
+            color_status = "#2ec4b6" if row["Online"] else "#e63946" # Verde o Rojo
+            bg_color = "#e0fbfc" if row["Online"] else "#ffe5d9"
+            
+            st.markdown(f"""
+            <div style='padding:15px; background:{bg_color}; border-radius:10px; border:1px solid {color_status}; margin-bottom:10px; display:flex; align_items:center; justify-content:space-between;'>
+                <div style='display:flex; align_items:center;'>
+                    <span style='font-size:24px; margin-right:10px;'>👤</span>
+                    <h3 style='margin:0; color:#005f73;'>{row['Usuario']}</h3>
+                </div>
+                <div style='display:flex; align_items:center;'>
+                    <span style='height: 15px; width: 15px; background-color: {color_status}; border-radius: 50%; display: inline-block; margin-right:5px;'></span>
+                    <b style='color:{color_status};'>{row['Estado']}</b>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+# ===================== APP PRINCIPAL =====================
+def main_app():
+    load_css()
+    
+    # Actualizar estado de usuario activo
+    if st.session_state.usuario:
+        update_user_status(st.session_state.usuario)
+    
+    # --- MENSAJE BIENVENIDA (JS 10s) ---
+    if 'welcome_shown' not in st.session_state:
+        st.session_state.welcome_shown = True
+        components.html(f"""
+        <script>
+            var msg = document.createElement('div');
+            msg.innerHTML = "👋 BIENVENIDO {st.session_state.usuario}";
+            msg.style.position = 'fixed';
+            msg.style.top = '20px';
+            msg.style.left = '50%';
+            msg.style.transform = 'translateX(-50%)';
+            msg.style.backgroundColor = '#005f73';
+            msg.style.color = 'white';
+            msg.style.padding = '15px 30px';
+            msg.style.borderRadius = '10px';
+            msg.style.zIndex = '9999';
+            msg.style.fontSize = '20px';
+            msg.style.boxShadow = '0 4px 6px rgba(0,0,0,0.1)';
+            msg.style.textAlign = 'center';
+            document.body.appendChild(msg);
+            setTimeout(function() {{
+                msg.style.transition = 'opacity 1s';
+                msg.style.opacity = '0';
+                setTimeout(function() {{ document.body.removeChild(msg); }}, 1000);
+            }}, 10000);
+        </script>
+        """, height=0)
+    
+    # --- HEADER ---
+    col1, col2, col3, col4 = st.columns([2, 4, 2, 2])
+    with col1:
+        st.markdown(f"""
+        <div class='user-box'>
+            <span style='height: 12px; width: 12px; background-color: #2ec4b6; border-radius: 50%; display: inline-block;'></span>
+            👤 {st.session_state.usuario}
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        pass 
+                 
+    with col4:
+        # Botón de cerrar sesión con estilo
+        if st.button("🔒 Cerrar sesión"):
+            logout()
+    
+    st.markdown("---")
+    
+    # --- CARGAR DATOS EN MEMORIA ---
+    if 'df' not in st.session_state or st.session_state.df is None:
+        try:
+            st.session_state.df = cargar_excel()
+            if os.path.exists("archivo_consolidado.xlsx"):
+                 try:
+                     df_c = pd.read_excel("archivo_consolidado.xlsx", engine="openpyxl")
+                     st.session_state.df_ciudades = clean_df_for_st(df_c)
+                 except:
+                     st.session_state.df_ciudades = st.session_state.df
+            else:
+                 st.session_state.df_ciudades = st.session_state.df
+        except Exception as e:
+            st.error(f"Error cargando datos iniciales: {e}")
+            st.session_state.df = None
+            st.session_state.df_ciudades = None
+
+    df = st.session_state.df
+
+    # --- FILTROS (Mover arriba para tener df_filtrado y botones disponibles) ---
+    # Nota: Los filtros se renderizan en Sidebar, pero la lógica de filtrado se ejecuta aquí
+    # para poder mostrar los botones de descarga ARRIBA.
+    
+    st.sidebar.header("🔍 Filtros de Análisis")
+    
+    profs = get_dropdown_options(df, ["profesional"])
+    procs = get_dropdown_options(df, ["nombre procedimiento"])
+    ciudades_df = st.session_state.get('df_ciudades', df)
+    ciuds = get_dropdown_options(ciudades_df, ["ciudad", "municipio"])
+    if not ciuds:
+         ciuds = get_dropdown_options(ciudades_df, ["sede"])
+    
+    sel_prof = st.sidebar.selectbox("Profesional", ["Todos"] + profs)
+    sel_proc = st.sidebar.selectbox("Procedimiento", ["Todos"] + procs)
+    sel_ciud = st.sidebar.selectbox("Ciudad / Municipio", ["Todos"] + ciuds)
+    
+    col_d1, col_d2 = st.sidebar.columns(2)
+    with col_d1:
+        f_ini = st.date_input("Fecha Inicio", value=None)
+    with col_d2:
+        f_fin = st.date_input("Fecha Fin", value=None)
+    
+    prof_arg = sel_prof if sel_prof != "Todos" else None
+    proc_arg = sel_proc if sel_proc != "Todos" else None
+    ciud_arg = sel_ciud if sel_ciud != "Todos" else None
+    
+    df_filtrado, aviso = filtrar_datos(df, prof_arg, f_ini, f_fin, proc_arg, ciud_arg)
+    
+    if aviso:
+        st.sidebar.warning(aviso)
+
+    # --- INFO ESTADO Y DESCARGAS (SUPERIOR) ---
+    fecha_update = cargar_fecha_actualizacion()
+    
+    # Layout de botones e info
+    col_info, col_btn1, col_btn2 = st.columns([2, 1, 1])
+    with col_info:
+        st.info(f"🕒 {fecha_update} | 📦 Consolidado")
+    with col_btn1:
+        if os.path.exists("archivo_consolidado.xlsx"):
+            with open("archivo_consolidado.xlsx", "rb") as f:
+                st.download_button("📥 Descargar Consolidado", f, file_name="archivo_consolidado.xlsx", use_container_width=True)
+    with col_btn2:
+        if not df_filtrado.empty:
+            excel_data = generar_excel_filtros(df_filtrado, prof_arg, f_ini, f_fin, proc_arg, ciud_arg)
+            st.download_button("📊 Descargar Filtros", excel_data, file_name="reporte_filtrado.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+
+    # --- VALIDACIÓN DE DATOS ---
+    if df is None:
+        st.warning("No hay datos cargados. Por favor cargue archivos en la pestaña correspondiente (Admin).")
+        # Mostrar tabs básicos si es admin para permitir carga
+        if st.session_state.usuario != "admin":
+            return
+
+    # --- TABS DEFINITION ---
+    tabs_names = ["📊 ANÁLISIS", "💰 TOTAL", "🏆 DASHBOARD", "✅ CUMPLIMIENTO", "🔄 CRUCES DE DATOS"]
+    if st.session_state.usuario == "admin":
+        tabs_names.insert(0, "📂 CONSOLIDACIÓN")
+        tabs_names.insert(0, "👥 USUARIOS")
+    
+    tabs = st.tabs(tabs_names)
+    
+    # Asignar variables a tabs
+    if st.session_state.usuario == "admin":
+        tab_users = tabs[0]
+        tab_consol = tabs[1]
+        tab1 = tabs[2]
+        tab2 = tabs[3]
+        tab3 = tabs[4]
+        tab4 = tabs[5]
+        tab_cruces = tabs[6]
+    else:
+        tab1 = tabs[0]
+        tab2 = tabs[1]
+        tab3 = tabs[2]
+        tab4 = tabs[3]
+        tab_cruces = tabs[4]
+    
+    # TAB USUARIOS (Solo Admin)
+    if st.session_state.usuario == "admin":
+        with tab_users:
+            st.subheader("👥 Gestión de Usuarios y Estado")
+            # Panel auto-actualizable cada 5 segundos
+            render_user_status_panel()
+
+    # TAB CONSOLIDACIÓN (Solo Admin)
+    if st.session_state.usuario == "admin":
+        with tab_consol:
+            st.subheader("Gestión de Archivos")
+            st.markdown("Cargue los archivos para consolidar o actualizar la base de datos.")
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                archivo1 = st.file_uploader("Archivo 1 (Base Principal)", type=["xlsx"])
+            with col_f2:
+                archivo2 = st.file_uploader("Archivo 2 (Información Complementaria)", type=["xlsx"])
+            
+            col_act1, col_act2 = st.columns(2)
+            with col_act1:
+                if archivo1:
+                    if st.button("🔄 Procesar y Consolidar Archivos"):
+                        leer_excel(archivo1, archivo2)
+                        st.rerun()
+            with col_act2:
+                if os.path.exists("archivo_consolidado.xlsx") or os.path.exists("base_guardada.xlsx"):
+                     if st.button("🗑️ Eliminar Consolidado Totalmente"):
+                         eliminar_consolidado()
+    
+    # TAB CRUCES DE DATOS
+    with tab_cruces:
+        st.subheader("🔄 Cruce de Información")
+        st.markdown("Suba dos archivos para comparar registros y encontrar coincidencias o diferencias.")
+        
+        col_cruce1, col_cruce2 = st.columns(2)
+        with col_cruce1:
+            file_cruce1 = st.file_uploader("Archivo A (Base)", type=["xlsx"], key="cruce1")
+        with col_cruce2:
+            file_cruce2 = st.file_uploader("Archivo B (Comparar)", type=["xlsx"], key="cruce2")
+            
+        # Gestión de Estado de Archivos Cargados
+        if 'cruce_df1' not in st.session_state:
+            st.session_state.cruce_df1 = None
+        if 'cruce_df2' not in st.session_state:
+            st.session_state.cruce_df2 = None
+            
+        if file_cruce1 and file_cruce2:
+            # Botón para Cargar (solo si no están cargados o si cambian archivos)
+            # Nota: Streamlit reinicia file_uploader si se recarga la página, 
+            # pero aquí queremos persistencia durante la sesión de análisis.
+            
+            if st.button("📥 Cargar Archivos para Análisis"):
+                try:
+                    with st.spinner("Leyendo archivos grandes... esto puede tardar unos momentos..."):
+                        gc.collect()
+                        
+                        # Leer y guardar en Session State
+                        st.session_state.cruce_df1 = pd.read_excel(file_cruce1, engine="openpyxl", dtype=str)
+                        st.session_state.cruce_df2 = pd.read_excel(file_cruce2, engine="openpyxl", dtype=str)
+                        
+                        st.session_state.cruce_df1 = clean_df_for_st(st.session_state.cruce_df1)
+                        st.session_state.cruce_df2 = clean_df_for_st(st.session_state.cruce_df2)
+                        
+                        st.success(f"Archivos cargados en memoria: {st.session_state.cruce_df1.shape[0]} filas en A, {st.session_state.cruce_df2.shape[0]} filas en B")
+                        
+                except Exception as e:
+                    st.error(f"Error cargando archivos: {e}")
+            
+            # Si ya hay datos en memoria, mostrar opciones de cruce
+            if st.session_state.cruce_df1 is not None and st.session_state.cruce_df2 is not None:
+                df_c1 = st.session_state.cruce_df1
+                df_c2 = st.session_state.cruce_df2
+                
+                common_cols = list(set(df_c1.columns) & set(df_c2.columns))
+                
+                if common_cols:
+                    col_key = st.selectbox("Seleccione columna clave para cruzar (ej: Cédula, Código)", common_cols)
+                    
+                    # Botón para EJECUTAR el cruce (Usuario pidió explícitamente este botón)
+                    if st.button("🚀 Iniciar Cruce de Datos"):
+                        try:
+                            # Optimización: Convertir a string vectorizado y strip
+                            df_c1[col_key] = df_c1[col_key].astype(str).str.strip()
+                            df_c2[col_key] = df_c2[col_key].astype(str).str.strip()
+                            
+                            with st.spinner("Realizando cruce de datos..."):
+                                progress_bar = st.progress(0)
+                                
+                                # Paso 1: Lectura y Preparación (Simulado 30%)
+                                progress_bar.progress(30, text="Analizando estructuras...")
+                                
+                                # Usar indicator=True para saber origen de manera más eficiente
+                                # ESTRATEGIA OPTIMIZADA DE MEMORIA: NO USAR OUTER MERGE GIGANTE
+                                
+                                # 1. Identificar claves
+                                keys_a = set(df_c1[col_key])
+                                keys_b = set(df_c2[col_key])
+                                
+                                # 2. Filtrar "Solo en A" (No Repetidos) SIN hacer merge masivo
+                                # Esto es mucho más ligero que un outer join
+                                no_en_b = df_c1[~df_c1[col_key].isin(keys_b)].copy()
+                                
+                                # 3. Filtrar "Solo en B" (si se necesita métrica)
+                                no_en_a = df_c2[~df_c2[col_key].isin(keys_a)].copy()
+                                
+                                # 4. Coincidencias (Repetidos) - Inner Merge
+                                # Solo unimos lo que coincide
+                                coincidencias = pd.merge(df_c1, df_c2, on=col_key, how='inner', suffixes=('_A', '_B'))
+                                
+                                progress_bar.progress(80, text="Generando reportes...")
+                                
+                                # Generar Buffer Excel para descarga
+                                buffer_cruce = io.BytesIO()
+                                with pd.ExcelWriter(buffer_cruce, engine='xlsxwriter') as writer:
+                                    coincidencias.to_excel(writer, sheet_name='REPETIDOS', index=False)
+                                    no_en_b.to_excel(writer, sheet_name='NO REPETIDOS', index=False)
+                                buffer_cruce.seek(0)
+                                
+                                # Guardar resultados en Session State para que no desaparezcan
+                                st.session_state.cruce_resultado = {
+                                    'coincidencias': coincidencias,
+                                    'no_en_b': no_en_b,
+                                    'no_en_a': no_en_a,
+                                    'buffer': buffer_cruce
+                                }
+                                
+                                progress_bar.progress(100, text="¡Análisis Completado!")
+                                time.sleep(0.5)
+                                progress_bar.empty()
+                                st.rerun()
+
+                        except MemoryError:
+                            st.error("⚠️ Error de Memoria: Los archivos son demasiado grandes.")
+                        except Exception as e:
+                            st.error(f"Error en el cruce: {e}")
+
+                else:
+                    st.warning("No se encontraron columnas con el mismo nombre para cruzar automáticamente.")
+            
+            # Mostrar Resultados si existen en Session State
+            if 'cruce_resultado' in st.session_state:
+                res = st.session_state.cruce_resultado
+                
+                st.divider()
+                st.success("✅ Resultados del último cruce:")
+                
+                col_res1, col_res2, col_res3 = st.columns(3)
+                with col_res1:
+                    st.metric("Coincidencias", len(res['coincidencias']))
+                with col_res2:
+                    st.metric("Solo en Archivo A", len(res['no_en_b']))
+                with col_res3:
+                    st.metric("Solo en Archivo B", len(res['no_en_a']))
+                    
+                # Botón de Descarga
+                st.download_button(
+                    label="📥 Descargar Resultado del Cruce (Excel)",
+                    data=res['buffer'],
+                    file_name=f"cruce_datos_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                
+                tab_res1, tab_res2, tab_res3 = st.tabs(["✅ Coincidencias", "⚠️ Solo en A", "⚠️ Solo en B"])
+                
+                with tab_res1:
+                    st.dataframe(res['coincidencias'])
+                with tab_res2:
+                    st.dataframe(res['no_en_b'])
+                with tab_res3:
+                    st.dataframe(res['no_en_a'])
+
+
+    # Si no hay datos y no es admin, no mostrar resto
+    if df is None:
+        return
+
+    # TAB 1: ANÁLISIS
+    with tab1:
+        st.subheader("Resumen Profesional por Procedimiento")
+        
+        if not df_filtrado.empty:
+            col_profesional = next((c for c in df_filtrado.columns if "profesional" in str(c).lower()), None)
+            col_procedimiento = next((c for c in df_filtrado.columns if "nombre procedimiento" in str(c).lower()), None)
+            col_valor = next((c for c in df_filtrado.columns if "valor" in str(c).lower()), None)
+
+            if col_profesional and col_procedimiento and col_valor:
+                try:
+                    temp = df_filtrado.copy()
+                    temp["_valor"] = pd.to_numeric(temp[col_valor], errors='coerce').fillna(0)
+                    
+                    agrupado = temp.groupby([col_profesional, col_procedimiento]).agg(
+                        Total_Servicios=(col_procedimiento, 'count'),
+                        Valor_Total=('_valor', 'sum')
+                    ).reset_index()
+                    
+                    agrupado = agrupado.sort_values([col_profesional, "Total_Servicios"], ascending=[True, False])
+                    
+                    st.dataframe(
+                        agrupado, 
+                        column_config={
+                            col_profesional: "Profesional",
+                            col_procedimiento: "Procedimiento",
+                            "Total_Servicios": st.column_config.ProgressColumn(
+                                "Total Servicios",
+                                help="Cantidad de servicios realizados",
+                                format="%d",
+                                min_value=0,
+                                max_value=int(agrupado["Total_Servicios"].max()),
+                            ),
+                            "Valor_Total": st.column_config.NumberColumn(
+                                "Valor Total",
+                                help="Valor monetario total",
+                                format="$ %d"
+                            )
+                        },
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    st.error(f"Error generando resumen profesional: {e}")
+            else:
+                st.warning("No se encontraron columnas de profesional, procedimiento o valor para generar el resumen.")
+
+        st.markdown("---")
+        st.subheader("Resumen Detallado por Paciente")
+        
+        if not df_filtrado.empty:
+            col_paciente = next((c for c in df_filtrado.columns if "paciente" in str(c).lower()), None)
+            col_procedimiento = next((c for c in df_filtrado.columns if "nombre procedimiento" in str(c).lower()), None)
+            col_valor = next((c for c in df_filtrado.columns if "valor" in str(c).lower()), None)
+            
+            if col_paciente and col_procedimiento:
+                try:
+                    temp = df_filtrado.copy()
+                    temp["_valor"] = pd.to_numeric(temp[col_valor], errors='coerce').fillna(0) if col_valor else 0
+                    
+                    # Agrupación por Paciente y Procedimiento (Detallado)
+                    resumen_paciente = temp.groupby([col_paciente, col_procedimiento]).agg(
+                        Cantidad=(col_procedimiento, 'count'),
+                        Valor_Total=('_valor', 'sum')
+                    ).reset_index()
+                    
+                    resumen_paciente = resumen_paciente.sort_values([col_paciente, "Cantidad"], ascending=[True, False])
+                    
+                    # Formateo visual
+                    st.dataframe(
+                        resumen_paciente,
+                        column_config={
+                            col_paciente: "Nombre del Paciente",
+                            col_procedimiento: "Nombre Procedimiento",
+                            "Cantidad": st.column_config.NumberColumn(
+                                "Total Procedimiento",
+                                help="Cantidad de veces que se realizó este procedimiento al paciente",
+                                format="%d"
+                            ),
+                            "Valor_Total": st.column_config.NumberColumn(
+                                "Valor Total",
+                                help="Valor monetario total de este procedimiento para el paciente",
+                                format="$ %d"
+                            )
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                        height=500
+                    )
+                    
+                    with st.expander("Ver Detalle Matricial (Tabla Cruzada)"):
+                        pivot = temp.pivot_table(
+                            index=col_paciente,
+                            columns=col_procedimiento,
+                            aggfunc='size',
+                            fill_value=0
+                        )
+                        pivot = clean_df_for_st(pivot)
+                        st.dataframe(pivot, use_container_width=True)
+
+                except Exception as e:
+                    st.error(f"Error agrupando: {e}")
+                    st.dataframe(df_filtrado)
+            else:
+                st.dataframe(df_filtrado)
+        else:
+            st.info("Sin resultados para mostrar")
+
+    # TAB 2: TOTAL
+    with tab2:
+        total_val = calcular_totales(df_filtrado)
+        st.markdown(f"<div style='text-align:center; background:#e0fbfc; padding:20px; border-radius:15px; border: 1px solid #94d2bd;'><h1 style='color:#005f73;'>💰 Total: {formato_pesos(total_val)}</h1></div>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        col_proc = next((c for c in df_filtrado.columns if "nombre procedimiento" in str(c).lower()), None)
+        col_val = next((c for c in df_filtrado.columns if "valor" in str(c).lower()), None)
+        
+        if col_proc and col_val and not df_filtrado.empty:
+            temp = df_filtrado.copy()
+            temp["_val"] = pd.to_numeric(temp[col_val], errors='coerce').fillna(0)
+            
+            # Agrupación más detallada
+            agrupado = temp.groupby(col_proc).agg(
+                Cantidad=(col_proc, 'count'),
+                Valor_Num=('_val', 'sum')
+            ).reset_index()
+            
+            agrupado = agrupado.sort_values("Valor_Num", ascending=False)
+            
+            # Calcular participación
+            total_global = agrupado["Valor_Num"].sum()
+            agrupado["Participacion"] = (agrupado["Valor_Num"] / total_global * 100) if total_global > 0 else 0
+            
+            # Formatear Valor (String con puntos)
+            agrupado["Valor Total"] = agrupado["Valor_Num"].apply(formato_pesos)
+            
+            agrupado = clean_df_for_st(agrupado)
+            
+            st.subheader("Detalle por Procedimiento")
+            
+            st.dataframe(
+                agrupado,
+                column_config={
+                    col_proc: "Procedimiento",
+                    "Cantidad": st.column_config.NumberColumn(
+                        "Frecuencia",
+                        help="Cantidad de veces realizado",
+                        format="%d"
+                    ),
+                    "Valor Total": st.column_config.TextColumn(
+                        "Valor Total",
+                        help="Valor facturado (COP)"
+                    ),
+                    "Participacion": st.column_config.ProgressColumn(
+                        "Participación %",
+                        format="%.1f%%",
+                        min_value=0,
+                        max_value=100,
+                        help="Peso sobre el total facturado"
+                    ),
+                    "Valor_Num": None 
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=600
+            )
+            
+            # Gráfica Circular de Participación
+            st.markdown("### 🥧 Participación por Procedimiento")
+            if not agrupado.empty:
+                # Tomar Top 10 para legibilidad
+                top_agrupado = agrupado.head(10).copy()
+                
+                fig_pie = px.pie(
+                    top_agrupado,
+                    names=col_proc,
+                    values="Valor_Num",
+                    hole=0.4,
+                    color_discrete_sequence=px.colors.sequential.Teal
+                )
+                fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+                fig_pie.update_layout(showlegend=True, height=500)
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+    # TAB 3: DASHBOARD
+    with tab3:
+        st.subheader("Dashboard Profesional")
+        meta_dash = st.number_input("Meta General", value=cargar_meta("meta_dashboard.txt"))
+        if st.button("Guardar Meta Dashboard"):
+            guardar_meta("meta_dashboard.txt", meta_dash)
+            
+        col_prof = next((c for c in df_filtrado.columns if "profesional" in str(c).lower()), None)
+        if col_prof and not df_filtrado.empty:
+            counts = df_filtrado[col_prof].value_counts().reset_index()
+            counts.columns = ["Profesional", "Servicios"]
+            
+            if meta_dash > 0:
+                counts["Porcentaje"] = (counts["Servicios"] / meta_dash * 100)
+            else:
+                counts["Porcentaje"] = 0
+            
+            col_dash_left, col_dash_right = st.columns(2)
+            
+            with col_dash_left:
+                st.markdown("### 📋 Rendimiento General")
+                st.dataframe(
+                    counts,
+                    column_config={
+                        "Profesional": "Profesional",
+                        "Servicios": st.column_config.NumberColumn(
+                            "Servicios",
+                            help="Total de servicios realizados",
+                            format="%d"
+                        ),
+                        "Porcentaje": st.column_config.ProgressColumn(
+                            "Cumplimiento Meta",
+                            help="Porcentaje respecto a la meta",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=max(100, int(counts["Porcentaje"].max()) if not counts.empty else 100),
+                        )
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    height=600
+                )
+                
+            with col_dash_right:
+                st.markdown("### 🏆 Top 10 Profesionales (Cumplimiento)")
+                top_10 = counts.head(10).sort_values("Porcentaje", ascending=True) # Ordenar para barra horizontal o vertical
+                
+                fig_bar = px.bar(
+                    top_10,
+                    x="Profesional",
+                    y="Porcentaje",
+                    text="Porcentaje",
+                    color="Porcentaje",
+                    color_continuous_scale="Teal"
+                )
+                
+                fig_bar.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                fig_bar.update_layout(
+                    xaxis_title="Profesional",
+                    yaxis_title="% Cumplimiento Meta",
+                    yaxis_range=[0, max(110, top_10["Porcentaje"].max())],
+                    showlegend=False,
+                    height=500
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+    
+    # TAB 4: CUMPLIMIENTO
+    with tab4:
+        st.subheader("Cumplimiento de Meta")
+        col_m1, col_m2 = st.columns([1, 2])
+        with col_m1:
+            meta_cump = st.number_input("Establecer Meta Mensual ($)", value=cargar_meta("meta_cumplimiento.txt"))
+            if st.button("💾 Guardar Meta"):
+                guardar_meta("meta_cumplimiento.txt", meta_cump)
+        
+        total_actual = calcular_totales(df_filtrado)
+        pct = (total_actual / meta_cump * 100) if meta_cump > 0 else 0
+        faltante = max(meta_cump - total_actual, 0)
+        
+        st.divider()
+        
+        # Métricas Principales
+        col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+        with col_kpi1:
+            st.markdown(f"<div style='padding:15px; background:#e0fbfc; border-radius:10px; border:1px solid #94d2bd; text-align:center;'><h3>💰 Recaudo Actual</h3><h2>{formato_pesos(total_actual)}</h2></div>", unsafe_allow_html=True)
+        with col_kpi2:
+            st.markdown(f"<div style='padding:15px; background:#ffddd2; border-radius:10px; border:1px solid #e29578; text-align:center;'><h3>📉 Faltante Meta</h3><h2>{formato_pesos(faltante)}</h2></div>", unsafe_allow_html=True)
+        with col_kpi3:
+             color_pct = "green" if pct >= 100 else "orange" if pct >= 80 else "red"
+             st.markdown(f"<div style='padding:15px; background:#edf6f9; border-radius:10px; border:1px solid #83c5be; text-align:center;'><h3>🎯 Porcentaje</h3><h2 style='color:{color_pct};'>{pct:.1f}%</h2></div>", unsafe_allow_html=True)
+
+        st.divider()
+
+        # Gráficos Avanzados
+        col_g1, col_g2 = st.columns(2)
+        
+        with col_g1:
+            st.markdown("### 📊 Medidor de Progreso")
+            fig_gauge = go.Figure(go.Indicator(
+                mode = "gauge+number+delta",
+                value = total_actual,
+                domain = {'x': [0, 1], 'y': [0, 1]},
+                delta = {'reference': meta_cump, 'position': "top", 'valueformat': "$,.0f"},
+                gauge = {
+                    'axis': {'range': [0, meta_cump*1.2 if meta_cump > 0 else total_actual*1.2]},
+                    'bar': {'color': "#005f73"},
+                    'steps': [
+                        {'range': [0, meta_cump*0.5], 'color': "#e0fbfc"},
+                        {'range': [meta_cump*0.5, meta_cump*0.9], 'color': "#83c5be"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': meta_cump
+                    }
+                }
+            ))
+            fig_gauge.update_layout(height=400, margin=dict(l=20, r=20, t=50, b=20))
+            st.plotly_chart(fig_gauge, use_container_width=True)
+
+        with col_g2:
+            st.markdown("### 🥧 Distribución del Cumplimiento")
+            fig_pie = px.pie(
+                names=["Recaudado", "Faltante"], 
+                values=[total_actual, faltante], 
+                hole=0.6,
+                color_discrete_sequence=["#005f73", "#ffddd2"]
+            )
+            fig_pie.update_traces(textinfo='percent+label')
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+# ===================== MAIN EXECUTION =====================
+if __name__ == "__main__":
+    # Asegurar inicialización de estado
+    if 'usuario' not in st.session_state:
+        st.session_state.usuario = None
+
+    try:
+        if st.session_state.usuario:
+            main_app()
+        else:
+            login()
+    except Exception as e:
+        st.error(f"Ocurrió un error crítico: {e}")
+        # Intentar mostrar detalles si es posible
+        import traceback
+        st.code(traceback.format_exc())
