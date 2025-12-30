@@ -245,7 +245,29 @@ def main():
     
     # Sidebar Navigation
     st.sidebar.title("Navegación")
-    page = st.sidebar.radio("Ir a:", ["Procedimientos", "Actividades", "Administrador"])
+    
+    # Check if admin mode is active
+    if 'admin_mode' not in st.session_state:
+        st.session_state['admin_mode'] = False
+
+    # Top Right Admin Access
+    col_title, col_admin = st.columns([6, 1])
+    with col_admin:
+        if st.session_state['admin_mode']:
+            if st.button("Salir Admin"):
+                st.session_state['admin_mode'] = False
+                st.session_state['logged_in'] = False
+                st.rerun()
+        else:
+            if st.button("Administrador"):
+                st.session_state['admin_mode'] = True
+                st.rerun()
+
+    if st.session_state['admin_mode']:
+        page = "Administrador"
+        st.sidebar.info("Modo Administrador Activo")
+    else:
+        page = st.sidebar.radio("Ir a:", ["Procedimientos", "Actividades"])
     
     # --- PÁGINA: PROCEDIMIENTOS ---
     if page == "Procedimientos":
@@ -564,16 +586,13 @@ def main():
                                     f.write(uploaded_file.getbuffer())
                                 
                                 # Procesar
-                                xl = pd.read_excel(save_path, sheet_name=None)
-                                new_catalog = {'catalog_file_path': save_path}
-                                
-                                # Mapear hojas a listas
-                                # Asumimos estructura: Hoja "Profesionales" -> Columna "Nombre"
-                                # Esto depende de cómo estaba hecho upload_catalog en Flask.
-                                # Revisando Flask code... no lo leí completo, pero asumiré una estructura genérica o 
-                                # intentaré leer todas las columnas de la primera hoja.
-                                # MEJOR: Leo el código Flask original para ver `upload_catalog`.
-                                pass
+                                # Leer primera hoja para datos generales
+                                df_catalog = pd.read_excel(save_path) 
+                                new_catalog = extract_catalog(df_catalog)
+                                new_catalog['catalog_file_path'] = save_path
+                                save_catalog(new_catalog)
+                                st.success("Catálogo procesado y actualizado correctamente.")
+                                st.rerun()
                             except Exception as e:
                                 st.error(f"Error: {e}")
             
@@ -686,5 +705,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
