@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import os
 import json
 import csv
@@ -654,6 +655,14 @@ def main():
                     # Asumimos formato YYYY-MM-DD
                     df_act = df_act[df_act['Fecha'] == fil_date.strftime('%Y-%m-%d')]
                 
+                # Gráfico de Actividades
+                if not df_act.empty:
+                    st.subheader("Resumen de Actividades")
+                    act_counts = df_act['Nombre profesional'].value_counts().reset_index()
+                    act_counts.columns = ['Profesional', 'Cantidad']
+                    fig_act = px.bar(act_counts, x='Profesional', y='Cantidad', title='Actividades por Profesional')
+                    st.plotly_chart(fig_act, use_container_width=True)
+
                 st.dataframe(df_act, use_container_width=True)
                 
                 # Descargar
@@ -677,4 +686,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
 
