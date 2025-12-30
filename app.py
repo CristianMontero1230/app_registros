@@ -482,7 +482,8 @@ def main():
             
         suffix = st.session_state['form_id_suffix']
 
-        with st.form("proc_form"):
+        # with st.form("proc_form"):
+        if True: # Formulario interactivo
             # Determinar si estamos editando
             edit_id = st.session_state.get('edit_proc_id', None)
             default_vals = {}
@@ -519,17 +520,11 @@ def main():
                 # Documento Profesional (Auto-relleno si existe mapa)
                 prof_map = catalog.get('prof_map', {})
                 doc_val = prof_map.get(nombre_prof, "") if isinstance(nombre_prof, str) and nombre_prof in prof_map else ""
-                doc_opts = catalog.get('doc_prof', [])
-
-                if doc_opts:
-                    # Intentar seleccionar automáticamente si hay match
-                    idx = 0
-                    if doc_val and str(doc_val) in doc_opts:
-                         idx = doc_opts.index(str(doc_val)) + 1 # +1 por el "" inicial
-                    
-                    doc_prof = st.selectbox("Documento profesional", [""] + doc_opts, index=idx, key=f"dp_{suffix}")
-                else:
-                    doc_prof = st.text_input("Documento profesional", value=doc_val, key=f"dp_{suffix}")
+                
+                # Se eliminó la lista desplegable de documento por solicitud del usuario
+                # Ahora se arrastra automáticamente y se muestra en campo de texto
+                # Usamos nombre_prof en la key para forzar actualización visual
+                doc_prof = st.text_input("Documento profesional", value=doc_val, key=f"dp_{suffix}_{nombre_prof}", disabled=True)
 
                 nombre_pac = st.text_input("Nombre paciente", key=f"npac_{suffix}")
                 doc_pac = st.text_input("Documento paciente", key=f"dpac_{suffix}")
@@ -563,7 +558,8 @@ def main():
             panacea = st.selectbox("¿Se subió a Panacea?", panacea_opts, index=panacea_idx, key=panacea_key)
             novedad = st.text_area("Novedad", value=default_vals.get('Novedad', ''), key=novedad_key)
             
-            submitted = st.form_submit_button("Guardar")
+            # submitted = st.form_submit_button("Guardar")
+            submitted = st.button("Guardar")
             
             if submitted:
                 # Validaciones
