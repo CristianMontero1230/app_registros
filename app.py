@@ -325,13 +325,15 @@ def main():
                 # Documento Profesional (Auto-relleno si existe mapa)
                 prof_map = catalog.get('prof_map', {})
                 doc_val = prof_map.get(nombre_prof, "") if isinstance(nombre_prof, str) and nombre_prof in prof_map else ""
-                
-                if doc_val:
-                    doc_prof = st.text_input("Documento profesional", value=doc_val, disabled=True)
-                    # Hack para enviar el valor disabled en el submit no funciona directo, usamos estado o hidden logic
-                    # En streamlit el valor disabled no se envía? Se lee del widget.
-                elif catalog.get('doc_prof'):
-                    doc_prof = st.selectbox("Documento profesional", [""] + catalog.get('doc_prof'))
+                doc_opts = catalog.get('doc_prof', [])
+
+                if doc_opts:
+                    # Intentar seleccionar automáticamente si hay match
+                    idx = 0
+                    if doc_val and str(doc_val) in doc_opts:
+                         idx = doc_opts.index(str(doc_val)) + 1 # +1 por el "" inicial
+                    
+                    doc_prof = st.selectbox("Documento profesional", [""] + doc_opts, index=idx)
                 else:
                     doc_prof = st.text_input("Documento profesional", value=doc_val)
 
@@ -592,7 +594,9 @@ def main():
                                 new_catalog['catalog_file_path'] = save_path
                                 save_catalog(new_catalog)
                                 st.success("Catálogo procesado y actualizado correctamente.")
-                                st.rerun()
+                                st.info(f"Datos extraídos: {len(new_catalog.get('nombre_prof', []))} Profesionales, {len(new_catalog.get('municipio', []))} Municipios, {len(new_catalog.get('procedimiento', []))} Procedimientos.")
+                                if st.button("Recargar aplicación ahora"):
+                                    st.rerun()
                             except Exception as e:
                                 st.error(f"Error: {e}")
             
@@ -705,4 +709,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
