@@ -272,6 +272,11 @@ def main():
     # --- PÁGINA: PROCEDIMIENTOS ---
     if page == "Procedimientos":
         st.title("Registro de Procedimientos")
+
+        # Mensaje de éxito persistente tras guardar
+        if 'proc_success_msg' in st.session_state:
+            st.success(st.session_state['proc_success_msg'])
+            del st.session_state['proc_success_msg']
         
         # Búsqueda Limitada (Solo Novedad/Panacea)
         with st.expander("Buscar Registro por ID (Solo editar Novedad/Panacea)"):
@@ -288,6 +293,13 @@ def main():
                         st.error("ID no encontrado.")
         
         # Formulario
+        
+        # Gestión de ID de formulario para limpieza
+        if 'form_id_suffix' not in st.session_state:
+            st.session_state['form_id_suffix'] = 0
+            
+        suffix = st.session_state['form_id_suffix']
+
         with st.form("proc_form"):
             # Determinar si estamos editando
             edit_id = st.session_state.get('edit_proc_id', None)
@@ -314,13 +326,13 @@ def main():
                 st.text_input("Procedimiento", value=default_vals.get('Procedimiento', ''), disabled=True)
                 
             else:
-                # Modo Nuevo Registro
+                # Modo Nuevo Registro - Usamos claves dinámicas para resetear
                 # Nombre Profesional
                 prof_opts = catalog.get('nombre_prof', [])
                 if prof_opts:
-                    nombre_prof = st.selectbox("Nombre profesional", [""] + prof_opts)
+                    nombre_prof = st.selectbox("Nombre profesional", [""] + prof_opts, key=f"np_{suffix}")
                 else:
-                    nombre_prof = st.text_input("Nombre profesional")
+                    nombre_prof = st.text_input("Nombre profesional", key=f"np_{suffix}")
                 
                 # Documento Profesional (Auto-relleno si existe mapa)
                 prof_map = catalog.get('prof_map', {})
@@ -333,25 +345,25 @@ def main():
                     if doc_val and str(doc_val) in doc_opts:
                          idx = doc_opts.index(str(doc_val)) + 1 # +1 por el "" inicial
                     
-                    doc_prof = st.selectbox("Documento profesional", [""] + doc_opts, index=idx)
+                    doc_prof = st.selectbox("Documento profesional", [""] + doc_opts, index=idx, key=f"dp_{suffix}")
                 else:
-                    doc_prof = st.text_input("Documento profesional", value=doc_val)
+                    doc_prof = st.text_input("Documento profesional", value=doc_val, key=f"dp_{suffix}")
 
-                nombre_pac = st.text_input("Nombre paciente")
-                doc_pac = st.text_input("Documento paciente")
-                fecha_inicio = st.date_input("Fecha inicio", value=datetime.now())
+                nombre_pac = st.text_input("Nombre paciente", key=f"npac_{suffix}")
+                doc_pac = st.text_input("Documento paciente", key=f"dpac_{suffix}")
+                fecha_inicio = st.date_input("Fecha inicio", value=datetime.now(), key=f"fi_{suffix}")
                 
                 mun_opts = catalog.get('municipio', [])
                 if mun_opts:
-                    municipio = st.selectbox("Municipio", [""] + mun_opts)
+                    municipio = st.selectbox("Municipio", [""] + mun_opts, key=f"mun_{suffix}")
                 else:
-                    municipio = st.text_input("Municipio")
+                    municipio = st.text_input("Municipio", key=f"mun_{suffix}")
                 
                 proc_opts = catalog.get('procedimiento', [])
                 if proc_opts:
-                    procedimiento = st.selectbox("Procedimiento", [""] + proc_opts)
+                    procedimiento = st.selectbox("Procedimiento", [""] + proc_opts, key=f"proc_{suffix}")
                 else:
-                    procedimiento = st.text_input("Procedimiento")
+                    procedimiento = st.text_input("Procedimiento", key=f"proc_{suffix}")
 
             # Campos Editables siempre
             panacea_opts = ["", "Sí", "No"]
@@ -360,8 +372,14 @@ def main():
             if panacea_val in ['Sí', 'Si']: panacea_idx = 1
             elif panacea_val == 'No': panacea_idx = 2
             
-            panacea = st.selectbox("¿Se subió a Panacea?", panacea_opts, index=panacea_idx)
-            novedad = st.text_area("Novedad", value=default_vals.get('Novedad', ''))
+            # Usamos clave dinámica solo si NO estamos editando, o siempre?
+            # Si estamos editando, no queremos resetear al guardar, sino salir de edición.
+            # Así que dynamic key solo si not edit_id
+            panacea_key = f"pan_{suffix}" if not edit_id else "pan_edit"
+            novedad_key = f"nov_{suffix}" if not edit_id else "nov_edit"
+
+            panacea = st.selectbox("¿Se subió a Panacea?", panacea_opts, index=panacea_idx, key=panacea_key)
+            novedad = st.text_area("Novedad", value=default_vals.get('Novedad', ''), key=novedad_key)
             
             submitted = st.form_submit_button("Guardar")
             
@@ -392,6 +410,7 @@ def main():
                             df.at[i, 'Modificado'] = now_str
                             st.success(f"Registro {edit_id} actualizado.")
                             st.session_state.pop('edit_proc_id', None) # Salir modo edición
+                            st.rerun() # Recargar para salir de edición
                     else:
                         # Crear Nuevo
                         new_id = get_next_id(df)
@@ -415,11 +434,17 @@ def main():
                             'Modificado': ''
                         }
                         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                        st.success(f"Registro creado exitosamente. ID: {new_id}")
+                        
+                        # Guardar en Session State mensaje y flag para limpiar
+                        st.session_state['proc_success_msg'] = f"Registro creado exitosamente. ID: {new_id}"
+                        st.session_state['form_id_suffix'] += 1 # Incrementar para resetear widgets
                     
-                    # Guardar
+                    # Guardar archivo
                     df.to_csv(DATA_PATH, index=False)
                     update_excel_file()
+                    
+                    if not edit_id:
+                        st.rerun()
                     
         if st.session_state.get('edit_proc_id'):
             if st.button("Cancelar Edición"):
@@ -559,12 +584,63 @@ def main():
                 st.session_state['logged_in'] = False
                 st.rerun()
                 
+            # Dashboard en tiempo real
+            st.subheader("Estado Actual del Sistema")
+            col_refresh, col_info = st.columns([1, 5])
+            with col_refresh:
+                if st.button("🔄 Actualizar Datos"):
+                    st.rerun()
+            
+            with col_info:
+                st.caption(f"Última actualización: {datetime.now().strftime('%H:%M:%S')}")
+                
+            ensure_data_file()
+            ensure_activities_file()
+            
+            try:
+                df_proc = pd.read_csv(DATA_PATH)
+                df_act = pd.read_csv(DATA_ACTIVITIES_PATH)
+                
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Total Procedimientos", len(df_proc))
+                m2.metric("Total Actividades", len(df_act))
+                
+                # Conteo Panacea
+                panacea_count = 0
+                if 'Subido a Panacea' in df_proc.columns:
+                    panacea_count = len(df_proc[df_proc['Subido a Panacea'].isin(['Sí', 'Si'])])
+                m3.metric("Subidos a Panacea", panacea_count)
+                
+                # Gráficos Plotly
+                if not df_proc.empty:
+                    st.divider()
+                    g1, g2 = st.columns(2)
+                    with g1:
+                        if 'Municipio' in df_proc.columns:
+                            mun_counts = df_proc['Municipio'].value_counts().reset_index()
+                            mun_counts.columns = ['Municipio', 'Cantidad']
+                            fig_mun = px.pie(mun_counts, values='Cantidad', names='Municipio', title='Procedimientos por Municipio')
+                            st.plotly_chart(fig_mun, use_container_width=True)
+                    
+                    with g2:
+                        if 'Fecha inicio' in df_proc.columns:
+                            df_proc['Fecha_dt'] = pd.to_datetime(df_proc['Fecha inicio'], errors='coerce')
+                            date_counts = df_proc['Fecha_dt'].dt.date.value_counts().reset_index()
+                            date_counts.columns = ['Fecha', 'Cantidad']
+                            date_counts = date_counts.sort_values('Fecha')
+                            fig_date = px.bar(date_counts, x='Fecha', y='Cantidad', title='Procedimientos por Fecha')
+                            st.plotly_chart(fig_date, use_container_width=True)
+                            
+            except Exception as e:
+                st.error(f"Error cargando estadísticas: {e}")
+                
+            st.divider()
+                
             tab1, tab2 = st.tabs(["Gestión Procedimientos", "Seguimiento Actividades"])
             
             with tab1:
                 ensure_data_file()
                 df = pd.read_csv(DATA_PATH)
-                st.metric("Registros Totales", len(df))
                 
                 col1, col2 = st.columns(2)
                 with col1:
