@@ -24,7 +24,7 @@ DATA_HEADERS = [
 ]
 
 DATA_ACTIVITIES_HEADERS = [
-    'ID', 'Fecha', 'Nombre profesional', 'Actividad', 'Creado', 'Modificado'
+    'ID', 'Fecha', 'Nombre profesional', 'Procedimiento', 'Actividad', 'Creado', 'Modificado'
 ]
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), 'registros_procedimientos.csv')
@@ -200,13 +200,13 @@ def extract_catalog(df):
                 return sorted([str(x).strip() for x in df[cols[key]].dropna().unique() if str(x).strip() != ''])
         return []
     prof_name_col = None
-    for c in ['Nombre profesional','Profesional','Nombre del profesional']:
+    for c in ['Nombre profesional','Profesional','Nombre del profesional', 'nonbre profesional']:
         k = c.lower().strip()
         if k in cols:
             prof_name_col = cols[k]
             break
     prof_doc_col = None
-    for c in ['Documento profesional','Doc profesional','Documento del profesional']:
+    for c in ['Documento profesional','Doc profesional','Documento del profesional', 'docuemnto profesonal', 'documento profesional']:
         k = c.lower().strip()
         if k in cols:
             prof_doc_col = cols[k]
@@ -516,14 +516,25 @@ def main():
                 prof_act = st.selectbox("Nombre profesional", prof_opts, index=idx)
             else:
                 prof_act = st.text_input("Nombre profesional", value=act_defaults.get('Nombre profesional', ''))
-                
+            
+            # Procedimiento (Nuevo campo)
+            proc_opts = catalog.get('procedimiento', [])
+            if proc_opts:
+                curr_proc = act_defaults.get('Procedimiento', '')
+                idx_proc = 0
+                if curr_proc in proc_opts:
+                    idx_proc = proc_opts.index(curr_proc) + 1
+                proc_act = st.selectbox("Procedimiento", [""] + proc_opts, index=idx_proc)
+            else:
+                proc_act = st.text_input("Procedimiento", value=act_defaults.get('Procedimiento', ''))
+
             actividad_txt = st.text_area("Actividad / Observación", value=act_defaults.get('Actividad', ''))
             
             submit_act = st.form_submit_button("Guardar Actividad")
             
             if submit_act:
                 if not prof_act or not actividad_txt:
-                    st.error("Complete todos los campos")
+                    st.error("Complete todos los campos obligatorios (Nombre y Actividad)")
                 else:
                     ensure_activities_file()
                     sync_activities_db()
@@ -536,6 +547,7 @@ def main():
                             i = idx[0]
                             df.at[i, 'Fecha'] = fecha.strftime('%Y-%m-%d')
                             df.at[i, 'Nombre profesional'] = prof_act
+                            df.at[i, 'Procedimiento'] = proc_act
                             df.at[i, 'Actividad'] = actividad_txt
                             df.at[i, 'Modificado'] = now_str
                             st.success("Actividad actualizada.")
@@ -546,6 +558,7 @@ def main():
                             'ID': new_id,
                             'Fecha': fecha.strftime('%Y-%m-%d'),
                             'Nombre profesional': prof_act,
+                            'Procedimiento': proc_act,
                             'Actividad': actividad_txt,
                             'Creado': now_str,
                             'Modificado': ''
@@ -601,7 +614,7 @@ def main():
                 df_proc = pd.read_csv(DATA_PATH)
                 df_act = pd.read_csv(DATA_ACTIVITIES_PATH)
                 
-                m1, m2, m3 = st.columns(3)
+                m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Total Procedimientos", len(df_proc))
                 m2.metric("Total Actividades", len(df_act))
                 
@@ -610,6 +623,10 @@ def main():
                 if 'Subido a Panacea' in df_proc.columns:
                     panacea_count = len(df_proc[df_proc['Subido a Panacea'].isin(['Sí', 'Si'])])
                 m3.metric("Subidos a Panacea", panacea_count)
+                
+                # Conteo No Panacea
+                no_panacea_count = len(df_proc) - panacea_count
+                m4.metric("No Subidos a Panacea", no_panacea_count)
                 
                 # Gráficos Plotly
                 if not df_proc.empty:
