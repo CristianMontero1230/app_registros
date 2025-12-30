@@ -281,7 +281,7 @@ def main():
         # Búsqueda Limitada (Solo Novedad/Panacea)
         with st.expander("Buscar Registro por ID (Solo editar Novedad/Panacea)"):
             search_id = st.number_input("Ingrese ID para buscar", min_value=1, step=1, key="search_proc_id")
-            if st.button("Buscar Procedimiento"):
+            if st.button("Buscar Procedimiento por ID"):
                 ensure_data_file()
                 df = pd.read_csv(DATA_PATH)
                 if 'ID' in df.columns:
@@ -289,8 +289,27 @@ def main():
                     if not record.empty:
                         st.session_state['edit_proc_id'] = search_id
                         st.success(f"Registro {search_id} encontrado.")
+                        st.rerun()
                     else:
                         st.error("ID no encontrado.")
+        
+        # Búsqueda por Profesional
+        with st.expander("Buscar Registros por Profesional"):
+            prof_search_opts = catalog.get('nombre_prof', [])
+            if prof_search_opts:
+                sel_prof = st.selectbox("Seleccione Profesional", [""] + prof_search_opts, key="search_prof_proc")
+                if sel_prof:
+                    ensure_data_file()
+                    df = pd.read_csv(DATA_PATH)
+                    if 'Nombre profesional' in df.columns:
+                        results = df[df['Nombre profesional'] == sel_prof]
+                        if not results.empty:
+                            st.write(f"Encontrados {len(results)} registros.")
+                            st.dataframe(results[['ID', 'Fecha inicio', 'Nombre paciente', 'Procedimiento', 'Subido a Panacea']], use_container_width=True)
+                        else:
+                            st.info("No hay registros para este profesional.")
+            else:
+                st.warning("No hay profesionales en el catálogo.")
         
         # Formulario
         
@@ -633,19 +652,29 @@ def main():
                     st.divider()
                     g1, g2 = st.columns(2)
                     with g1:
-                        if 'Municipio' in df_proc.columns:
-                            mun_counts = df_proc['Municipio'].value_counts().reset_index()
-                            mun_counts.columns = ['Municipio', 'Cantidad']
-                            fig_mun = px.pie(mun_counts, values='Cantidad', names='Municipio', title='Procedimientos por Municipio')
-                            st.plotly_chart(fig_mun, use_container_width=True)
+                        # Gráfico Panacea vs No Panacea
+                        if 'Subido a Panacea' in df_proc.columns:
+                            # Normalizar valores
+                            df_proc['Estado Panacea'] = df_proc['Subido a Panacea'].apply(lambda x: 'Subido' if x in ['Sí', 'Si'] else 'No Subido')
+                            pan_counts = df_proc['Estado Panacea'].value_counts().reset_index()
+                            pan_counts.columns = ['Estado', 'Cantidad']
+                            
+                            fig_pan = px.pie(pan_counts, values='Cantidad', names='Estado', 
+                                            title='Estado de Subida a Panacea',
+                                            color='Estado',
+                                            color_discrete_map={'Subido':'#00CC96', 'No Subido':'#EF553B'})
+                            st.plotly_chart(fig_pan, use_container_width=True)
                     
                     with g2:
                         if 'Fecha inicio' in df_proc.columns:
                             df_proc['Fecha_dt'] = pd.to_datetime(df_proc['Fecha inicio'], errors='coerce')
+                            # Agrupar por fecha
                             date_counts = df_proc['Fecha_dt'].dt.date.value_counts().reset_index()
-                            date_counts.columns = ['Fecha', 'Cantidad']
+                            date_counts.columns = ['Fecha', 'Total Procedimientos']
                             date_counts = date_counts.sort_values('Fecha')
-                            fig_date = px.bar(date_counts, x='Fecha', y='Cantidad', title='Procedimientos por Fecha')
+                            
+                            fig_date = px.bar(date_counts, x='Fecha', y='Total Procedimientos', 
+                                            title='Total Procedimientos por Fecha de Inicio')
                             st.plotly_chart(fig_date, use_container_width=True)
                             
             except Exception as e:
@@ -692,6 +721,36 @@ def main():
                                     st.rerun()
                             except Exception as e:
                                 st.error(f"Error: {e}")
+                
+                # Restauración de Backup (Nueva función)
+                st.divider()
+                st.subheader("Restauración y Seguridad de Datos")
+                st.info("Nota: En Streamlit Cloud, los datos se reinician si la app se detiene. Use esta opción para restaurar una copia guardada previamente.")
+                
+                uploaded_backup = st.file_uploader("Restaurar Copia de Seguridad (registros_procedimientos.xlsx)", type=['xlsx'])
+                if uploaded_backup:
+                    if st.button("⚠️ Restaurar Datos desde Archivo"):
+                        try:
+                            # Leer y validar
+                            df_backup = pd.read_excel(uploaded_backup)
+                            # Verificar columnas mínimas
+                            required = ['Nombre profesional', 'Nombre paciente', 'Procedimiento']
+                            if all(col in df_backup.columns for col in required):
+                                # Reindexar para asegurar formato
+                                for col in DATA_HEADERS:
+                                    if col not in df_backup.columns:
+                                        df_backup[col] = ''
+                                df_backup = df_backup.reindex(columns=DATA_HEADERS)
+                                
+                                # Guardar
+                                df_backup.to_csv(DATA_PATH, index=False)
+                                update_excel_file()
+                                st.success("¡Datos restaurados exitosamente! La aplicación se recargará.")
+                                st.rerun()
+                            else:
+                                st.error("El archivo no parece ser un backup válido (faltan columnas clave).")
+                        except Exception as e:
+                            st.error(f"Error al restaurar: {e}")
             
                 # Edición Completa
                 st.subheader("Buscar y Editar Registro (Completo)")
@@ -802,5 +861,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
