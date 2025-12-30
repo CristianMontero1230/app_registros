@@ -911,32 +911,7 @@ def main():
                     else:
                         st.warning("⚠️ Modo Local (Sin persistencia en la nube). Configure los Secretos.")
 
-                st.info("Nota: En Streamlit Cloud, los datos se reinician si la app se detiene. Use esta opción para restaurar una copia guardada previamente.")
-                
-                uploaded_backup = st.file_uploader("Restaurar Copia de Seguridad (registros_procedimientos.xlsx)", type=['xlsx'])
-                if uploaded_backup:
-                    if st.button("⚠️ Restaurar Datos desde Archivo"):
-                        try:
-                            # Leer y validar
-                            df_backup = pd.read_excel(uploaded_backup)
-                            # Verificar columnas mínimas
-                            required = ['Nombre profesional', 'Nombre paciente', 'Procedimiento']
-                            if all(col in df_backup.columns for col in required):
-                                # Reindexar para asegurar formato
-                                for col in DATA_HEADERS:
-                                    if col not in df_backup.columns:
-                                        df_backup[col] = ''
-                                df_backup = df_backup.reindex(columns=DATA_HEADERS)
-                                
-                                # Guardar
-                                df_backup.to_csv(DATA_PATH, index=False)
-                                update_excel_file()
-                                st.success("¡Datos restaurados exitosamente! La aplicación se recargará.")
-                                st.rerun()
-                            else:
-                                st.error("El archivo no parece ser un backup válido (faltan columnas clave).")
-                        except Exception as e:
-                            st.error(f"Error al restaurar: {e}")
+
             
                 # Edición Completa
                 st.subheader("Buscar y Editar Registro (Completo)")
@@ -1047,6 +1022,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
