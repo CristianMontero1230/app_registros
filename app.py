@@ -7,6 +7,7 @@ import csv
 from datetime import datetime
 from io import BytesIO
 from openpyxl.styles import Font, PatternFill
+from sqlalchemy import create_engine, text
 
 # Configuración de la página
 st.set_page_config(
@@ -38,7 +39,169 @@ UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 ADMIN_USER = os.environ.get('ADMIN_USER', 'admin') # Default to admin if not set
 ADMIN_PASS = os.environ.get('ADMIN_PASS', 'admin') # Default to admin if not set
 
-# --- Funciones de Gestión de Datos ---
+# --- GESTIÓN DE BASE DE DATOS (PERSISTENCIA CLOUD) ---
+
+def get_db_connection():
+    """
+    Intenta conectar a la base de datos definida en st.secrets["db_url"] o st.secrets["database"]["url"].
+    Retorna el engine de SQLAlchemy o None si no hay configuración.
+    """
+    db_url = None
+    try:
+        if "db_url" in st.secrets:
+            db_url = st.secrets["db_url"]
+        elif "database" in st.secrets and "url" in st.secrets["database"]:
+            db_url = st.secrets["database"]["url"]
+    except:
+        pass
+    
+    if db_url:
+        try:
+            engine = create_engine(db_url)
+            # Test connection
+            with engine.connect() as conn:
+                pass
+            return engine
+        except Exception as e:
+            print(f"DB Connection Error: {e}")
+            return None
+    return None
+
+def init_db(engine):
+    """Crea las tablas si no existen"""
+    if not engine: return
+    
+    try:
+        with engine.connect() as conn:
+            # Tabla Procedimientos
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS procedimientos (
+                    "ID" BIGINT PRIMARY KEY,
+                    "Nombre profesional" TEXT,
+                    "Documento profesional" TEXT,
+                    "Nombre paciente" TEXT,
+                    "Documento paciente" TEXT,
+                    "Fecha inicio" TEXT,
+                    "Municipio" TEXT,
+                    "Procedimiento" TEXT,
+                    "Subido a Panacea" TEXT,
+                    "Novedad" TEXT,
+                    "Creado" TEXT,
+                    "Modificado" TEXT
+                )
+            """))
+            # Tabla Actividades
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS actividades (
+                    "ID" BIGINT PRIMARY KEY,
+                    "Fecha" TEXT,
+                    "Nombre profesional" TEXT,
+                    "Procedimiento" TEXT,
+                    "Actividad" TEXT,
+                    "Creado" TEXT,
+                    "Modificado" TEXT
+                )
+            """))
+            conn.commit()
+    except Exception as e:
+        print(f"Error init DB: {e}")
+
+def sync_local_to_db(engine):
+    """Sube datos locales a la DB si la DB está vacía (Primera migración)"""
+    if not engine: return
+    
+    try:
+        # Procedimientos
+        with engine.connect() as conn:
+            res = conn.execute(text('SELECT COUNT(*) FROM procedimientos'))
+            count = res.scalar()
+            if count == 0 and os.path.exists(DATA_PATH):
+                df = pd.read_csv(DATA_PATH)
+                if not df.empty:
+                    df.to_sql('procedimientos', engine, if_exists='append', index=False)
+                    print("Migrados procedimientos a DB Cloud")
+        
+        # Actividades
+        with engine.connect() as conn:
+            res = conn.execute(text('SELECT COUNT(*) FROM actividades'))
+            count = res.scalar()
+            if count == 0 and os.path.exists(DATA_ACTIVITIES_PATH):
+                df = pd.read_csv(DATA_ACTIVITIES_PATH)
+                if not df.empty:
+                    df.to_sql('actividades', engine, if_exists='append', index=False)
+                    print("Migradas actividades a DB Cloud")
+                    
+    except Exception as e:
+        print(f"Error sync local to DB: {e}")
+
+def load_data_procedimientos():
+    """Carga datos de DB o CSV local"""
+    engine = get_db_connection()
+    if engine:
+        try:
+            # Asegurar tablas
+            init_db(engine)
+            sync_local_to_db(engine)
+            
+            # Leer de DB
+            df = pd.read_sql('SELECT * FROM procedimientos', engine)
+            # Asegurar columnas
+            for col in DATA_HEADERS:
+                if col not in df.columns:
+                    df[col] = ''
+            return df
+        except Exception as e:
+            st.error(f"Error leyendo DB Cloud: {e}. Usando local.")
+    
+    # Fallback Local
+    ensure_data_file()
+    return pd.read_csv(DATA_PATH)
+
+def save_data_procedimientos(df):
+    """Guarda en DB y CSV local"""
+    # Guardar local siempre como backup/cache
+    df.to_csv(DATA_PATH, index=False)
+    update_excel_file()
+    
+    engine = get_db_connection()
+    if engine:
+        try:
+            # Reemplazar tabla completa (Estrategia simple para apps pequeñas)
+            # Para apps grandes, usar UPDATE/INSERT por ID
+            df.to_sql('procedimientos', engine, if_exists='replace', index=False)
+            # Re-aplicar PK (to_sql replace dropea constraints en algunos motores, pero es aceptable para este prototipo)
+        except Exception as e:
+            st.warning(f"No se pudo sincronizar con la Nube: {e}")
+
+def load_data_actividades():
+    engine = get_db_connection()
+    if engine:
+        try:
+            init_db(engine)
+            sync_local_to_db(engine)
+            df = pd.read_sql('SELECT * FROM actividades', engine)
+            for col in DATA_ACTIVITIES_HEADERS:
+                if col not in df.columns:
+                    df[col] = ''
+            return df
+        except Exception:
+            pass
+    ensure_activities_file()
+    sync_activities_db()
+    return pd.read_csv(DATA_ACTIVITIES_PATH)
+
+def save_data_actividades(df):
+    df.to_csv(DATA_ACTIVITIES_PATH, index=False)
+    update_activities_excel_file()
+    
+    engine = get_db_connection()
+    if engine:
+        try:
+            df.to_sql('actividades', engine, if_exists='replace', index=False)
+        except Exception as e:
+            st.warning(f"No se pudo sincronizar actividades con la Nube: {e}")
+
+# --- Funciones de Gestión de Datos (Legacy Wrappers) ---
 
 def ensure_data_file():
     if not os.path.exists(DATA_PATH):
@@ -416,7 +579,8 @@ def main():
                     for e in errors: st.error(e)
                 else:
                     ensure_data_file()
-                    df = pd.read_csv(DATA_PATH)
+                    # Cargar datos (DB o Local)
+                    df = load_data_procedimientos()
                     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     
                     if edit_id:
@@ -458,9 +622,8 @@ def main():
                         st.session_state['proc_success_msg'] = f"Registro creado exitosamente. ID: {new_id}"
                         st.session_state['form_id_suffix'] += 1 # Incrementar para resetear widgets
                     
-                    # Guardar archivo
-                    df.to_csv(DATA_PATH, index=False)
-                    update_excel_file()
+                    # Guardar archivo (DB y Local)
+                    save_data_procedimientos(df)
                     
                     if not edit_id:
                         st.rerun()
@@ -557,7 +720,7 @@ def main():
                 else:
                     ensure_activities_file()
                     sync_activities_db()
-                    df = pd.read_csv(DATA_ACTIVITIES_PATH)
+                    df = load_data_actividades()
                     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     
                     if edit_act_id:
@@ -585,8 +748,7 @@ def main():
                         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                         st.success(f"Actividad guardada. ID: {new_id}")
                         
-                    df.to_csv(DATA_ACTIVITIES_PATH, index=False)
-                    update_activities_excel_file()
+                    save_data_actividades(df)
                     
         if st.session_state.get('edit_act_id'):
              if st.button("Cancelar Edición Actividad"):
@@ -725,6 +887,30 @@ def main():
                 # Restauración de Backup (Nueva función)
                 st.divider()
                 st.subheader("Restauración y Seguridad de Datos")
+                
+                # Instrucciones para Base de Datos Cloud
+                with st.expander("Configuración Base de Datos Cloud (Persistencia Real)"):
+                    st.info("""
+                    Para evitar que los datos se borren al reiniciar la app en la nube, configure una base de datos externa (PostgreSQL, MySQL, etc.).
+                    
+                    **Pasos para configurar en Streamlit Cloud:**
+                    1. Cree una base de datos (ej. en Supabase, Neon, Railway - son gratuitos).
+                    2. Obtenga la URL de conexión (ej. `postgresql://user:pass@host:port/db`).
+                    3. Vaya a su App en Streamlit Cloud -> Settings -> Secrets.
+                    4. Agregue lo siguiente:
+                    ```toml
+                    [database]
+                    url = "su_url_de_conexion_aqui"
+                    ```
+                    La aplicación detectará automáticamente la base de datos y sincronizará la información.
+                    """)
+                    
+                    engine = get_db_connection()
+                    if engine:
+                        st.success("✅ Conectado a Base de Datos Cloud Externa")
+                    else:
+                        st.warning("⚠️ Modo Local (Sin persistencia en la nube). Configure los Secretos.")
+
                 st.info("Nota: En Streamlit Cloud, los datos se reinician si la app se detiene. Use esta opción para restaurar una copia guardada previamente.")
                 
                 uploaded_backup = st.file_uploader("Restaurar Copia de Seguridad (registros_procedimientos.xlsx)", type=['xlsx'])
@@ -861,4 +1047,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
 
